@@ -2,7 +2,7 @@
 
 **Browse CivitAI images in ComfyUI, preview protected images, and edit prompts before you generate.**
 
-ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper nodes for **protected image preview**, **prompt editing**, and **quick info**.
+ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper nodes for **protected images**, **prompt editing**, and **quick info**.
 
 ---
 
