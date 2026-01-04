@@ -192,3 +192,9 @@ A small info preview panel that updates instantly when you select an image.
 ## 📄 License
 
 MIT License (see `LICENSE`).
+
+
+## 🙏 Acknowledgements
+
+Inspired by earlier community work exploring similar workflows and UI ideas.
+
