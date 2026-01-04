@@ -28,17 +28,17 @@ Example workflows:
 - `workflows/Gallery_image_to_image.json`
 - `workflows/Gallery_Z-image_Turbo.json`
 
-Note:
-  -Gallery text to image and Gallery image to image workflows use ComfyUI core nodes plus this node pack.
-  -Gallery Z-image Turbo workflow uses additional custome nodes.
-  -Click the Fetch button to grab a random test image, the test image is available without an API key.
+###Note:
+  Gallery text to image and Gallery image to image workflows use ComfyUI core nodes plus this node pack.
+  Gallery Z-image Turbo workflow uses additional custome nodes.
+  Click the Fetch button to grab a random test image, the test image is available without an API key.
 
 ---
 
-## 📸 Screenshots
--Image2Image and Text2Image workflow examples.
--Alternative 'Show Text' or 'Show Any' nodes can be used but they will not populate automatically, Run will need to initiated first.
--They must also be compatible with Node2 requirements.
+### 📸 Screenshots
+Image2Image and Text2Image workflow examples.
+Alternative 'Show Text' or 'Show Any' nodes can be used but they will not populate automatically, Run will need to initiated first.
+They must also be compatible with Node2 requirements.
 
 **Nodes**
 To search for the nodes type Civit
