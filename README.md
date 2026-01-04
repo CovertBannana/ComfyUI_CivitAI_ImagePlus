@@ -74,7 +74,7 @@ To search for the nodes type Civit
 
 ### Option A — ComfyUI Manager
 1. Open **ComfyUI → Manager**
-2. Install **ComfyUI_CivitAI_ImagePlus**
+2. Install **ComfyUI-CivitAI-ImagePlus**
 3. Restart ComfyUI
 
 ### Option B — Manual
