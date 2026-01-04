@@ -1,16 +1,18 @@
 # ComfyUI CivitAI ImagePlus
 
-**Browse CivitAI images in ComfyUI, preview protected images, and edit prompts before you generate.**
+**Browse CivitAI images in ComfyUI, preview protected images, and edit prompts before you generate and pass to image 2 image.**
+Compatible with ComfyUI 0.6+
 
-ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper nodes for **protected images**, **prompt editing**, and **quick info**.
+ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper nodes for **image preview with I2I connector**, **prompt editing**, and **quick info**.
+Nodes are populated instantly without a need to run the workflow.
 
 ---
 
 ## ✅ What you can do
 
-- **Open a full-screen CivitAI gallery** from inside ComfyUI
+- **Open a full-screen CivitAI gallery, display Most Reactions, Most Comments and Newest** from inside ComfyUI
 - **Pick an image** and instantly:
-  - preview it (including **protected** images)
+  - preview it (including **protected** images if you have an API key)
   - load its prompts into an editor
   - see a handy info panel
 - **Fetch by URL** (paste a CivitAI link)
@@ -20,19 +22,42 @@ ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper
 
 ## 📸 Screenshots & demo workflows
 
-Coming soon. (We’ll add screenshots and example workflows once they’re captured.)
+Example workflows:
 
-Recommended demo files to add later:
-- `workflows/demo_txt2img.json`
-- `workflows/demo_img2img_protected.json`
-- `workflows/demo_fetch_url.json`
+- `workflows/Gallery_text_to_image.json`
+- `workflows/Gallery_image_to_image.json`
+- `workflows/Gallery_Z-image_Turbo.json`
+
+Note:
+  Gallery text to image and Gallery image to image workflows use ComfyUI core nodes plus this node pack.
+  Gallery Z-image Turbo workflow uses additional custome nodes.
+  Click the Fetch button to grab a random test image, the test image is available without an API key.
+
+---
+
+
+## 📸 Screenshots
+
+<p align="center">
+  <a href="examples/gallery_T2I.jpg">
+    <img src="screenshots/gallery_T2I.jpg" width="300" alt="Text 2 Image example" />
+  </a>
+  <a href="examples/gallery_I2I.jpg">
+    <img src="screenshots/gallery_I2I.jpg" width="300" alt="Image 2 Image example" />
+  </a>
+  <a href="examples/Alt_nodes.jpg">
+    <img src="examples/Alt_nodes.jpg" width="300" alt="Alternate nodes can be used (show text, show any), they will not populate until Run is initiated." />
+  </a>
+</p>
+
+<p align="center"><em>Click any image to open full size.</em></p>
+``
 
 ---
 
 ## 🧩 Installation
 
 ### Option A — ComfyUI Manager
-(Once this repo is public and indexed)
 1. Open **ComfyUI → Manager**
 2. Install **ComfyUI_CivitAI_ImagePlus**
 3. Restart ComfyUI
@@ -42,17 +67,19 @@ Recommended demo files to add later:
    - `ComfyUI/custom_nodes/`
 2. Clone this repo:
    ```bash
-   git clone https://github.com/<YOUR_USERNAME>/ComfyUI_CivitAI_ImagePlus.git
+   git clone https://github.com/CovertBannana/ComfyUI_CivitAI_ImagePlus.git
    ```
 3. Restart ComfyUI
 
----
+### Option C — (Zip)
+1. If your having trouble with Git, click the Code button, download as Zip and extract the folder to your ComfyUI custom_nodes folder.
+2. Restart ComfyUI
 
 ## 🔑 CivitAI API Key (required for protected images)
 
 To preview and fetch **protected** content, you need a CivitAI API key.
 
-1. Create this file:
+1. Create the file if it doesn't exist:
 
 ```
 custom_nodes/ComfyUI_CivitAI_ImagePlus/api_key.txt
@@ -70,18 +97,17 @@ CIVITAI_API_KEY=YOUR_CIVITAI_API_KEY_HERE
 
 ## 🧱 Nodes (what each one does)
 
-### 1) **CivitAI Gallery (Rebuilt)**
+### 1) **CivitAI Gallery**
 Open the gallery and select images.
 
 - **Open Gallery**: full-screen browsing
 - **Fetch URL** + **Fetch**: paste a CivitAI URL and load the image
 
-**Tip:** Using a **post URL** is best (example: `https://civitai.com/posts/<id>`).
+**Tip:** you can use a **post URL** (example: `https://civitai.com/posts/<id>`) or an **image URL** (example: `https://civitai.com/images/<id>`)
 
 ---
 
-### 2) **CivitAI Image Preview (Protected)**
-Shows an instant preview (including protected images) and outputs an `IMAGE` for workflows.
+### 2) **CivitAI Image Preview**
 
 - **Copy CivitAI Page URL** button: copies the CivitAI page link for the selected image (the page that shows generation info)
 - Output: `IMAGE` (great for **img2img**)
@@ -116,9 +142,9 @@ A small info preview panel that updates instantly when you select an image.
 3. Connect Prompt Editor outputs to your text/CLIP encode nodes
 4. Generate
 
-### B) img2img (protected preview → use as init image)
+### B) img2img (preview → use as init image)
 1. Select an image in **CivitAI Gallery**
-2. Confirm it in **CivitAI Image Preview (Protected)**
+2. Confirm it in **CivitAI Image Preview**
 3. Use Preview output as your **img2img init image**
 4. Edit prompts in Prompt Editor
 
