@@ -28,7 +28,7 @@ Example workflows:
 - `workflows/Gallery_image_to_image.json`
 - `workflows/Gallery_Z-image_Turbo.json`
 
-###Note:  
+**Note:**  
   Gallery text to image and Gallery image to image workflows use ComfyUI core nodes plus this node pack.  
   Gallery Z-image Turbo workflow uses additional custome nodes.  
   Click the Fetch button to grab a random test image, the test image is available without an API key.
