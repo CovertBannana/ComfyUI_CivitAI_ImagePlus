@@ -35,15 +35,17 @@ Note:
 
 ---
 
-
 ## 📸 Screenshots
+Image2Image and Text2Image workflow examples.
+Alternative 'Show Text' or 'Show Any' nodes can be used but they will not populate automatically, Run will need to initiated first.
+They must also be compatible with Node2 requirements.
 
 <p align="center">
   <a href="examples/gallery_T2I.jpg">
-    <img src="screenshots/gallery_T2I.jpg" width="300" alt="Text 2 Image example" />
+    <img src="examples/gallery_T2I.jpg" width="300" alt="Text 2 Image example" />
   </a>
   <a href="examples/gallery_I2I.jpg">
-    <img src="screenshots/gallery_I2I.jpg" width="300" alt="Image 2 Image example" />
+    <img src="examples/gallery_I2I.jpg" width="300" alt="Image 2 Image example" />
   </a>
   <a href="examples/Alt_nodes.jpg">
     <img src="examples/Alt_nodes.jpg" width="300" alt="Alternate nodes can be used (show text, show any), they will not populate until Run is initiated." />
