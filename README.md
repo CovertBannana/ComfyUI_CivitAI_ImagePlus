@@ -40,6 +40,20 @@ Image2Image and Text2Image workflow examples.
 Alternative 'Show Text' or 'Show Any' nodes can be used but they will not populate automatically, Run will need to initiated first.
 They must also be compatible with Node2 requirements.
 
+**Nodes**
+To search for the nodes type Civit
+
+<p align="center">
+  <a href="examples/search.jpg">
+    <img src="examples/search.jpg" width="300" alt="Image 2 Image example" />
+  </a>
+  <a href="examples/Nodes.jpg">
+    <img src="examples/nodes.jpg" width="300" alt="Nodes" />
+  </a>
+</p>
+
+**Workflow examples**
+
 <p align="center">
   <a href="examples/gallery_T2I.jpg">
     <img src="examples/gallery_T2I.jpg" width="300" alt="Text 2 Image example" />
@@ -53,7 +67,6 @@ They must also be compatible with Node2 requirements.
 </p>
 
 <p align="center"><em>Click any image to open full size.</em></p>
-``
 
 ---
 
