@@ -47,7 +47,7 @@ To search for the nodes type Civit
   <a href="examples/search.jpg">
     <img src="examples/search.jpg" width="300" alt="Image 2 Image example" />
   </a>
-  <a href="examples/Nodes.jpg">
+  <a href="examples/nodes.jpg">
     <img src="examples/nodes.jpg" width="300" alt="Nodes" />
   </a>
 </p>
