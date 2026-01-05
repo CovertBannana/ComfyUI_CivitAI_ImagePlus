@@ -20,13 +20,13 @@ Nodes are populated instantly without a need to run the workflow.
 
 ---
 
-## 📸 Screenshots & demo workflows
+## 📸 Demo workflows
 
 Example workflows:
 
-- `workflows/Gallery_text_to_image.json`
-- `workflows/Gallery_image_to_image.json`
-- `workflows/Gallery_Z-image_Turbo.json`
+- `[workflows/Gallery_text_to_image.json](https://github.com/CovertBannana/ComfyUI_CivitAI_ImagePlus/blob/main/workflows/Gallery_image_to_image.json)`
+- `[workflows/Gallery_image_to_image.json](https://github.com/CovertBannana/ComfyUI_CivitAI_ImagePlus/blob/main/workflows/Gallery_text_to_image.json)`
+- `[workflows/Gallery_Z-image_Turbo.json]([Gallery_Z-image_Turbo.json](https://github.com/CovertBannana/ComfyUI_CivitAI_ImagePlus/blob/main/workflows/Gallery_Z-image_Turbo.json))`
 
 **Note:**  
   Gallery text to image and Gallery image to image workflows use ComfyUI core nodes plus this node pack.  
