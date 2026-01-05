@@ -509,8 +509,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "CivitaiGalleryNode": "CivitAI Gallery (Rebuilt)",
+    "CivitaiGalleryNode": "CivitAI Gallery",
     "CivitaiPromptEditorNode": "CivitAI Prompt Editor",
     "CivitaiInfoDisplayNode": "CivitAI Info Display",
-    "CivitaiImagePreviewNode": "CivitAI Image Preview (Protected)",
+    "CivitaiImagePreviewNode": "CivitAI Image Preview",
 }
+
