@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-civitai-imageplus"
-version = "0.1.1"
+version = "0.1.2"
 description = "Browse CivitAI images in ComfyUI, extract and edit prompts, preview selected image and pass to I2I."
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -17,4 +17,5 @@ Repository = "https://github.com/CovertBannana/ComfyUI_CivitAI_ImagePlus"
 PublisherId = "covertbannana"
 DisplayName = "CivitAI ImagePlus"
 Icon = ""
+
 
