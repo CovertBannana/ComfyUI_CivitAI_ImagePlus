@@ -1,16 +1,57 @@
-
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 console.log("[CivitAI Gallery] frontend script loaded");
 
-const STORAGE_KEY = "civitai_gallery_simple_v1";
+const STORAGE_KEY = "civitai_gallery_simple_v2";
+
+const PAGE_BASES = {
+  com: "https://civitai.com",
+  red: "https://civitai.red",
+};
+
 let currentAbort = null;
 
 // cursor paging state
 let nextCursor = null;
 let nextPageUrl = null;
 let seenIds = new Set();
+
+function normalizePageDomain(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  if (v === "com" || v === "red" || v === "auto") return v;
+  return "auto";
+}
+
+function pageBaseFromSetting(value) {
+  const v = normalizePageDomain(value);
+  if (v === "com" || v === "red") return PAGE_BASES[v];
+  return "";
+}
+
+function pageBaseFromUrl(raw) {
+  try {
+    if (!raw) return "";
+    const u = new URL(String(raw));
+    const host = (u.hostname || "").toLowerCase();
+    if (
+      host === "civitai.com" ||
+      host === "www.civitai.com" ||
+      host === "civitai.red" ||
+      host === "www.civitai.red"
+    ) {
+      return `${u.protocol}//${u.host}`;
+    }
+  } catch {}
+  return "";
+}
+
+function buildProxyImageUrl(srcUrl, pageUrl = "") {
+  const proxy = new URL("/civitai_gallery/proxy_image", window.location.origin);
+  proxy.searchParams.set("url", srcUrl ?? "");
+  if (pageUrl) proxy.searchParams.set("page_url", pageUrl);
+  return proxy.toString();
+}
 
 // ---------------- Clipboard helper ----------------
 async function copyText(text) {
@@ -233,7 +274,7 @@ function isPreviewNode(node) {
 
 // ---------------- Data helpers ----------------
 function normalizeItemForSelection(item) {
-  const url = item?.url || item?.imageUrl || item?.src || "";
+  const url = item?.url ?? item?.imageUrl ?? item?.src ?? "";
   let meta = item?.meta ?? {};
   let id = item?.id ?? null;
   let postId = item?.postId ?? null;
@@ -246,7 +287,15 @@ function normalizeItemForSelection(item) {
   if (id != null) id = String(id);
   if (postId != null) postId = String(postId);
 
-  return { url, meta: meta || {}, id, postId };
+  return {
+    url,
+    meta: meta ?? {},
+    id,
+    postId,
+    pageUrl: item?.pageUrl ?? item?.page_url ?? "",
+    sourcePageUrl: item?.sourcePageUrl ?? item?.source_page_url ?? "",
+    pageDomain: item?.pageDomain ?? item?.page_domain ?? "",
+  };
 }
 
 function extractPrompts(meta) {
@@ -265,9 +314,18 @@ function extractPrompts(meta) {
   return { positive: positive || "", negative: negative || "" };
 }
 
-function buildPageUrl(imageId, postId) {
-  if (imageId) return `https://civitai.com/images/${imageId}`;
-  if (postId) return `https://civitai.com/posts/${postId}`;
+function buildPageUrl(imageId, postId, options = {}) {
+  const settings = loadSettings();
+  const pageDomain = normalizePageDomain(options.pageDomain ?? settings.pageDomain ?? "auto");
+
+  const forcedBase = pageBaseFromSetting(pageDomain);
+  const explicitBase = pageBaseFromUrl(options.explicitPageUrl);
+  const sourceBase = pageBaseFromUrl(options.sourcePageUrl);
+
+  const base = forcedBase || explicitBase || sourceBase || PAGE_BASES.com;
+
+  if (imageId) return `${base}/images/${imageId}`;
+  if (postId) return `${base}/posts/${postId}`;
   return "";
 }
 
@@ -369,24 +427,24 @@ function setInfoNode(node, text, pageUrl) {
 }
 
 async function setPreviewNode(node, srcUrl, pageUrl) {
-  node.__civitaiPageUrl = pageUrl || "";
-  node.__civitaiSourceUrl = srcUrl || "";
+  node.__civitaiPageUrl = pageUrl ?? "";
+  node.__civitaiSourceUrl = srcUrl ?? "";
 
   await postJSON("/civitai_gallery/set_preview", {
     node_id: String(node.id),
     url: node.__civitaiSourceUrl,
+    page_url: node.__civitaiPageUrl,
   });
 
-  const proxyUrl = `/civitai_gallery/proxy_image?url=${encodeURIComponent(node.__civitaiSourceUrl)}`;
-  node.__civitaiThumbUrl = proxyUrl;
+  const proxyUrl = buildProxyImageUrl(node.__civitaiSourceUrl, node.__civitaiPageUrl);
 
+  node.__civitaiThumbUrl = proxyUrl;
   if (!node.__civitaiThumbImg) {
     node.__civitaiThumbImg = new Image();
     node.__civitaiThumbImg.onload = () => node.graph?.setDirtyCanvas(true, true);
     node.__civitaiThumbImg.onerror = () => node.graph?.setDirtyCanvas(true, true);
   }
   node.__civitaiThumbImg.src = proxyUrl;
-
   node.graph?.setDirtyCanvas(true, true);
 }
 
@@ -397,7 +455,11 @@ async function updateSupportNodes(normalized) {
 
   const prompts = extractPrompts(normalized.meta);
   const model = modelNameFromMeta(normalized.meta);
-  const page = buildPageUrl(normalized.id, normalized.postId);
+  const page = buildPageUrl(normalized.id, normalized.postId, {
+    explicitPageUrl: normalized.pageUrl,
+    sourcePageUrl: normalized.sourcePageUrl,
+    pageDomain: normalized.pageDomain,
+  });
 
   const infoText =
     `CivitAI Page: ${page}` +
@@ -418,6 +480,7 @@ async function updateSupportNodes(normalized) {
 
 function applySelection(galleryNode, item) {
   const normalized = normalizeItemForSelection(item);
+  const selectedPageDomain = normalized.pageDomain || loadSettings().pageDomain || "auto";
 
   const payload = JSON.stringify({
     item: {
@@ -425,6 +488,9 @@ function applySelection(galleryNode, item) {
       meta: normalized.meta,
       id: normalized.id,
       postId: normalized.postId,
+      pageUrl: normalized.pageUrl,
+      sourcePageUrl: normalized.sourcePageUrl,
+      pageDomain: selectedPageDomain,
     },
   });
 
@@ -440,7 +506,10 @@ function applySelection(galleryNode, item) {
   galleryNode.flags = galleryNode.flags || {};
   galleryNode.flags.dirty = true;
 
-  updateSupportNodes(normalized);
+  updateSupportNodes({
+    ...normalized,
+    pageDomain: selectedPageDomain,
+  });
 }
 
 // ---------------- Gallery overlay ----------------
@@ -458,9 +527,24 @@ function saveSettings(s) {
 function loadSettings() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        sort: parsed.sort ?? "Most Reactions",
+        period: parsed.period ?? "AllTime",
+        limit: parsed.limit ?? 36,
+        nsfw: parsed.nsfw ?? "None",
+        pageDomain: normalizePageDomain(parsed.pageDomain ?? "auto"),
+      };
+    }
   } catch {}
-  return { sort: "Most Reactions", period: "AllTime", limit: 36, nsfw: "None" };
+  return {
+    sort: "Most Reactions",
+    period: "AllTime",
+    limit: 36,
+    nsfw: "None",
+    pageDomain: "auto",
+  };
 }
 
 function cursorFromNextPage(url) {
@@ -519,13 +603,24 @@ async function fetchPage(node, grid, settings, cursor, append = false) {
       if (itemId) seenIds.add(itemId);
       if (!item.url) continue;
 
+      const selectedPageDomain = settings.pageDomain || "auto";
+      const normalized = normalizeItemForSelection({
+        ...item,
+        pageDomain: item?.pageDomain ?? selectedPageDomain,
+      });
+      const pageUrl = buildPageUrl(normalized.id, normalized.postId, {
+        explicitPageUrl: normalized.pageUrl,
+        sourcePageUrl: normalized.sourcePageUrl,
+        pageDomain: normalized.pageDomain,
+      });
+
       const card = document.createElement("div");
       card.style.display = "flex";
       card.style.flexDirection = "column";
       card.style.gap = "6px";
 
       const img = document.createElement("img");
-      img.src = item.url;
+      img.src = buildProxyImageUrl(item.url, pageUrl);
       img.loading = "lazy";
       img.style.width = "100%";
       img.style.borderRadius = "6px";
@@ -533,7 +628,11 @@ async function fetchPage(node, grid, settings, cursor, append = false) {
 
       img.onclick = (e) => {
         e.stopPropagation();
-        applySelection(node, item);
+        applySelection(node, {
+          ...item,
+          pageDomain: normalized.pageDomain,
+          pageUrl,
+        });
         closeFullGallery();
       };
 
@@ -617,6 +716,16 @@ async function openFullGallery(node) {
     settings.nsfw
   );
 
+  const pageDomainSel = makeSelect(
+    "Page Links",
+    [
+      ["Auto", "auto"],
+      ["Civitai.com", "com"],
+      ["Civitai.red", "red"],
+    ],
+    settings.pageDomain ?? "auto"
+  );
+
   const searchBtn = document.createElement("button");
   searchBtn.textContent = "Search";
   stylizeButton(searchBtn);
@@ -631,6 +740,7 @@ async function openFullGallery(node) {
     periodSel.container,
     limitInput.container,
     nsfwSel.container,
+    pageDomainSel.container,
     searchBtn,
     closeBtn
   );
@@ -675,6 +785,7 @@ async function openFullGallery(node) {
     period: periodSel.select.value,
     limit: parseInt(limitInput.input.value || "36", 10),
     nsfw: nsfwSel.select.value,
+    pageDomain: pageDomainSel.select.value,
   };
   saveSettings(s0);
 
@@ -687,6 +798,7 @@ async function openFullGallery(node) {
       period: periodSel.select.value,
       limit: parseInt(limitInput.input.value || "36", 10),
       nsfw: nsfwSel.select.value,
+      pageDomain: pageDomainSel.select.value,
     };
     saveSettings(s2);
     const r = await fetchPage(node, grid, s2, 0, false);
@@ -699,6 +811,7 @@ async function openFullGallery(node) {
       period: periodSel.select.value,
       limit: parseInt(limitInput.input.value || "36", 10),
       nsfw: nsfwSel.select.value,
+      pageDomain: pageDomainSel.select.value,
     };
     saveSettings(s);
 
@@ -750,6 +863,11 @@ async function fetchAndApplyUrl(node, url) {
       alert("Could not resolve an image from that URL.");
       return;
     }
+
+    try {
+      item.sourcePageUrl = trimmed;
+      if (!item.pageUrl) item.pageUrl = trimmed;
+    } catch {}
 
     applySelection(node, item);
   } catch (e) {

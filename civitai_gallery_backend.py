@@ -1,4 +1,3 @@
-
 import os
 import json
 import aiohttp
@@ -9,13 +8,27 @@ import numpy as np
 from PIL import Image
 import io
 import urllib.request
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qs
+from typing import Optional
 
 # ------------------------------------------------------------
 # API key handling
 # ------------------------------------------------------------
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 API_KEY_FILE = os.path.join(NODE_DIR, "api_key.txt")
+
+# ------------------------------------------------------------
+# Config / future-proofing
+# ------------------------------------------------------------
+DEFAULT_SITE_API_BASES = (
+    "https://civitai.com/api/v1",
+    "https://civitai.red/api/v1",
+)
+
+DEFAULT_PAGE_BASES = {
+    "com": "https://civitai.com",
+    "red": "https://civitai.red",
+}
 
 
 def load_api_key():
@@ -29,11 +42,37 @@ def load_api_key():
     return None
 
 
+def _get_site_api_bases():
+    """
+    Future-proof:
+    - allows override via env var
+    - tries both .com and .red
+    """
+    env_base = (os.getenv("CIVITAI_SITE_API_BASE") or "").strip().rstrip("/")
+    bases = []
+    if env_base:
+        bases.append(env_base)
+    for b in DEFAULT_SITE_API_BASES:
+        if b not in bases:
+            bases.append(b)
+    return tuple(bases)
+
+
+def _get_page_domain_mode():
+    """
+    auto | com | red
+    """
+    mode = (os.getenv("CIVITAI_PAGE_DOMAIN_MODE") or "auto").strip().lower()
+    if mode not in ("auto", "com", "red"):
+        return "auto"
+    return mode
+
+
 # ------------------------------------------------------------
 # Simple in-memory stores (keyed by node unique_id)
 # ------------------------------------------------------------
-PROMPT_STORE = {}  # unique_id -> {"positive": str, "negative": str, "rev": int}
-PREVIEW_STORE = {}  # unique_id -> {"url": str, "rev": int}
+PROMPT_STORE = {}   # unique_id -> {"positive": str, "negative": str, "rev": int}
+PREVIEW_STORE = {}  # unique_id -> {"url": str, "page_url": str, "rev": int}
 
 
 def _bump(store: dict, unique_id: str):
@@ -60,9 +99,29 @@ def _redact_params(d: dict):
     return safe
 
 
+def _is_allowed_page_host(host: str) -> bool:
+    host = (host or "").lower()
+    return host in {
+        "civitai.com",
+        "www.civitai.com",
+        "civitai.red",
+        "www.civitai.red",
+    }
+
+
+def _is_allowed_page_url(raw_url: str) -> bool:
+    try:
+        u = urlparse(raw_url)
+        if u.scheme not in ("http", "https"):
+            return False
+        return _is_allowed_page_host(u.netloc)
+    except Exception:
+        return False
+
+
 def _is_allowed_image_url(raw_url: str) -> bool:
     """
-    Prevent SSRF: only allow civitai image hosts.
+    Prevent SSRF: only allow known civitai hosts.
     """
     try:
         u = urlparse(raw_url)
@@ -75,17 +134,86 @@ def _is_allowed_image_url(raw_url: str) -> bool:
             return True
         if host == "civitai.com":
             return True
+        if host.endswith(".civitai.red"):
+            return True
+        if host == "civitai.red":
+            return True
         return False
     except Exception:
         return False
 
 
-async def fetch_bytes_authed(url: str, api_key: str, timeout_s: int = 60) -> tuple[bytes, str]:
-    headers = {
+def _page_base_from_url(raw_url: str) -> Optional[str]:
+    if not raw_url:
+        return None
+    try:
+        u = urlparse(raw_url)
+        if u.scheme not in ("http", "https"):
+            return None
+        if not _is_allowed_page_host(u.netloc):
+            return None
+        return f"{u.scheme}://{u.netloc}"
+    except Exception:
+        return None
+
+
+def _preferred_page_base(
+    explicit_url: str = "",
+    source_url: str = "",
+    page_domain: str = "",
+) -> str:
+    """
+    Resolution order:
+    1) explicit URL (e.g. fetched post/image URL)
+    2) page_domain forced by frontend ("com" or "red")
+    3) source URL if it is a civitai page URL
+    4) env override mode
+    5) safe default: civitai.com
+    """
+    forced = (page_domain or "").strip().lower()
+    if forced in DEFAULT_PAGE_BASES:
+        return DEFAULT_PAGE_BASES[forced]
+
+    base = _page_base_from_url(explicit_url)
+    if base:
+        return base
+
+    base = _page_base_from_url(source_url)
+    if base:
+        return base
+
+    mode = _get_page_domain_mode()
+    if mode in DEFAULT_PAGE_BASES:
+        return DEFAULT_PAGE_BASES[mode]
+
+    return DEFAULT_PAGE_BASES["com"]
+
+
+def _build_civitai_page_url(image_id=None, post_id=None, page_base: str = ""):
+    base = (page_base or DEFAULT_PAGE_BASES["com"]).rstrip("/")
+    if image_id:
+        return f"{base}/images/{image_id}"
+    if post_id:
+        return f"{base}/posts/{post_id}"
+    return ""
+
+
+def _auth_headers(api_key: str, referer_url: str = "") -> dict:
+    referer_base = _preferred_page_base(explicit_url=referer_url)
+    return {
         "User-Agent": "ComfyUI-CivitAI-Gallery",
         "Authorization": f"Bearer {api_key}",
-        "Referer": "https://civitai.com/",
+        "Referer": referer_base.rstrip("/") + "/",
     }
+
+
+async def fetch_bytes_authed(
+    url: str,
+    api_key: str,
+    timeout_s: int = 60,
+    referer_url: str = "",
+) -> tuple[bytes, str]:
+    headers = _auth_headers(api_key, referer_url=referer_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, headers=headers) as resp:
@@ -95,6 +223,137 @@ async def fetch_bytes_authed(url: str, api_key: str, timeout_s: int = 60) -> tup
                 raise RuntimeError(f"Upstream image fetch failed ({resp.status}): {text[:300]}")
             data = await resp.read()
             return data, content_type
+
+
+def fetch_bytes_authed_sync(
+    url: str,
+    api_key: str,
+    timeout_s: int = 60,
+    referer_url: str = "",
+) -> tuple[bytes, str]:
+    headers = _auth_headers(api_key, referer_url=referer_url)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        data = r.read()
+        content_type = r.headers.get("Content-Type", "application/octet-stream")
+        return data, content_type
+
+
+async def _call_site_api_json(
+    path: str,
+    params: dict,
+    api_key: str,
+    timeout_s: int = 60,
+):
+    """
+    Try configured API bases in order. This future-proofs against
+    any host-level routing changes while keeping auth in headers.
+    """
+    clean_params = dict(params or {})
+    headers = _auth_headers(api_key)
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+
+    last_error = None
+    for base in _get_site_api_bases():
+        url = base.rstrip("/") + "/" + path.lstrip("/")
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=clean_params, headers=headers) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        last_error = {
+                            "error": "CivitAI request failed",
+                            "status": resp.status,
+                            "details": text[:800],
+                            "params": _redact_params(clean_params),
+                            "url": url,
+                        }
+                        continue
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        last_error = {
+                            "error": "CivitAI returned non-JSON response",
+                            "status": resp.status,
+                            "details": text[:800],
+                            "params": _redact_params(clean_params),
+                            "url": url,
+                        }
+                        continue
+                    return data, None
+        except Exception as e:
+            last_error = {
+                "error": "CivitAI request exception",
+                "details": str(e),
+                "params": _redact_params(clean_params),
+                "url": url,
+            }
+
+    return None, last_error or {"error": "Unknown CivitAI API failure"}
+
+
+def _safe_int(value, default, min_value=None, max_value=None):
+    try:
+        n = int(value)
+    except Exception:
+        n = default
+    if min_value is not None:
+        n = max(min_value, n)
+    if max_value is not None:
+        n = min(max_value, n)
+    return n
+
+
+def _iter_lookup_param_variants(id_key: str, id_value: str):
+    """
+    Future-proof against possible API changes around content filtering.
+    Try a few variants instead of assuming one forever.
+    """
+    base = {id_key: id_value, "limit": 1}
+    yield dict(base)
+    yield dict(base, nsfw="X")
+    yield dict(base, nsfw="true")
+    yield dict(base, nsfw=True)
+
+
+def _maybe_fetch_tensor_from_image_url(image_url: str, page_url: str = "") -> torch.Tensor:
+    """
+    Best-effort:
+    - try authed fetch first when API key exists
+    - otherwise try plain public fetch
+    """
+    if not image_url:
+        return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+
+    api_key = load_api_key()
+
+    # First: try authenticated fetch when we can
+    if api_key and _is_allowed_image_url(image_url):
+        try:
+            img_bytes, _ = fetch_bytes_authed_sync(
+                image_url,
+                api_key,
+                timeout_s=30,
+                referer_url=page_url,
+            )
+            img = Image.open(io.BytesIO(img_bytes))
+            return _tensor_from_pil(img)
+        except Exception:
+            pass
+
+    # Fallback: direct public fetch
+    try:
+        req = urllib.request.Request(
+            image_url,
+            headers={"User-Agent": "ComfyUI-CivitAI-Gallery"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            img_bytes = r.read()
+        img = Image.open(io.BytesIO(img_bytes))
+        return _tensor_from_pil(img)
+    except Exception as e:
+        print(f"[CivitAI Gallery] Image download failed: {e}")
+        return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
 
 # ------------------------------------------------------------
@@ -126,13 +385,6 @@ class CivitaiGalleryNode:
         )
         return positive or "", negative or ""
 
-    def _build_civitai_page_url(self, image_id=None, post_id=None):
-        if image_id:
-            return f"https://civitai.com/images/{image_id}"
-        if post_id:
-            return f"https://civitai.com/posts/{post_id}"
-        return ""
-
     def run(self, selection_data="{}"):
         try:
             data = json.loads(selection_data) if selection_data else {}
@@ -157,20 +409,31 @@ class CivitaiGalleryNode:
 
         positive, negative = self._extract_prompts(meta)
 
-        # Best-effort image tensor (protected-safe preview uses proxy route)
-        tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
-        image_url = item.get("url")
-        if image_url:
-            try:
-                req = urllib.request.Request(
-                    image_url, headers={"User-Agent": "ComfyUI-CivitAI-Gallery"}
-                )
-                with urllib.request.urlopen(req, timeout=30) as r:
-                    img_bytes = r.read()
-                img = Image.open(io.BytesIO(img_bytes))
-                tensor = _tensor_from_pil(img)
-            except Exception as e:
-                print(f"[CivitAI Gallery] Image download failed: {e}")
+        page_url = (
+            item.get("page_url")
+            or item.get("pageUrl")
+            or ""
+        )
+        source_page_url = (
+            item.get("source_page_url")
+            or item.get("sourcePageUrl")
+            or ""
+        )
+        page_domain = (
+            item.get("page_domain")
+            or item.get("pageDomain")
+            or ""
+        )
+
+        page_base = _preferred_page_base(
+            explicit_url=page_url,
+            source_url=source_page_url,
+            page_domain=page_domain,
+        )
+        if not page_url:
+            page_url = _build_civitai_page_url(image_id, post_id, page_base=page_base)
+
+        tensor = _maybe_fetch_tensor_from_image_url(item.get("url"), page_url=page_url)
 
         model_name = ""
         try:
@@ -180,7 +443,6 @@ class CivitaiGalleryNode:
         except Exception:
             pass
 
-        page_url = self._build_civitai_page_url(image_id, post_id)
         info = f"CivitAI Page: {page_url}" + (f"\nModel: {model_name}" if model_name else "")
         if not positive and not negative:
             info = "No prompts found.\n" + info
@@ -224,7 +486,6 @@ class CivitaiInfoDisplayNode:
     Display-only node:
     - No inputs
     - No outputs
-    - JS adds a textarea widget and updates it instantly.
     """
     @classmethod
     def INPUT_TYPES(cls):
@@ -275,19 +536,17 @@ class CivitaiImagePreviewNode:
             return (image,)
 
         uid = str(unique_id) if unique_id is not None else ""
-        url = (PREVIEW_STORE.get(uid) or {}).get("url", "") or ""
+        entry = PREVIEW_STORE.get(uid) or {}
+        url = (entry.get("url", "") or "").strip()
+        page_url = (entry.get("page_url", "") or "").strip()
+
         if not url:
             tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
             return (tensor,)
 
-        # Fetch via local proxy route to keep auth handling consistent
         try:
-            local = f"http://127.0.0.1:8188/civitai_gallery/proxy_image?url={quote(url, safe='')}"
-            req = urllib.request.Request(local, headers={"User-Agent": "ComfyUI-CivitAI-Gallery"})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                img_bytes = r.read()
-            img = Image.open(io.BytesIO(img_bytes))
-            return (_tensor_from_pil(img),)
+            tensor = _maybe_fetch_tensor_from_image_url(url, page_url=page_url)
+            return (tensor,)
         except Exception as e:
             print(f"[CivitAI Preview] Failed to fetch image: {e}")
             tensor = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
@@ -329,7 +588,7 @@ async def civitai_set_prompt(request):
 @prompt_server.routes.post("/civitai_gallery/set_preview")
 async def civitai_set_preview(request):
     """
-    Body: {"node_id": "<id>", "url": "..."}
+    Body: {"node_id": "<id>", "url": "...", "page_url": "..."}
     """
     try:
         body = await request.json()
@@ -341,8 +600,11 @@ async def civitai_set_preview(request):
         return web.json_response({"error": "Missing node_id"}, status=400)
 
     url = (body.get("url", "") or "").strip()
+    page_url = (body.get("page_url", "") or body.get("pageUrl", "") or "").strip()
+
     entry = PREVIEW_STORE.get(node_id) or {"rev": 0}
     entry["url"] = url
+    entry["page_url"] = page_url
     PREVIEW_STORE[node_id] = entry
     _bump(PREVIEW_STORE, node_id)
 
@@ -356,31 +618,39 @@ async def civitai_images(request):
         return web.json_response({"error": "CivitAI API key missing (api_key.txt)"}, status=401)
 
     p = dict(request.query)
-    limit = int(p.get("limit", "36"))
+    limit = _safe_int(p.get("limit", "36"), 36, min_value=1, max_value=200)
     sort = p.get("sort", "Most Reactions")
     period = p.get("period", "AllTime")
-    nsfw = p.get("nsfw", "None")
+    nsfw = (p.get("nsfw", "None") or "").strip()
     cursor = p.get("cursor", None)
     if cursor is not None:
         cursor = str(cursor).strip()
         if cursor == "":
             cursor = None
 
-    api_url = "https://civitai.com/api/v1/images"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    params = {"limit": min(200, limit), "sort": sort, "period": period, "nsfw": nsfw}
+    params = {
+        "limit": limit,
+        "sort": sort,
+        "period": period,
+    }
+    if nsfw:
+        params["nsfw"] = nsfw
     if cursor is not None:
         params["cursor"] = cursor
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, params=params, headers=headers) as resp:
-                data = await resp.json()
-                return web.json_response(
-                    {"items": data.get("items", []), "metadata": data.get("metadata", {}) or {}}
-                )
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+    data, err = await _call_site_api_json("/images", params, api_key)
+    if err and "nsfw" in params:
+        # Fallback in case the API changes NSFW filter behavior
+        params2 = dict(params)
+        params2.pop("nsfw", None)
+        data, err = await _call_site_api_json("/images", params2, api_key)
+
+    if err:
+        return web.json_response(err, status=err.get("status", 500))
+
+    return web.json_response(
+        {"items": data.get("items", []), "metadata": data.get("metadata", {}) or {}}
+    )
 
 
 @prompt_server.routes.get("/civitai_gallery/image_by_url")
@@ -393,14 +663,12 @@ async def civitai_image_by_url(request):
     if not raw_url:
         return web.json_response({"error": "Missing url parameter"}, status=400)
 
-    from urllib.parse import urlparse, parse_qs
+    if not _is_allowed_page_url(raw_url):
+        return web.json_response({"error": "Only civitai.com and civitai.red page URLs are supported"}, status=400)
 
     parsed = urlparse(raw_url)
     qs = parse_qs(parsed.query)
     path_parts = [p for p in parsed.path.strip("/").split("/") if p]
-
-    images_api = "https://civitai.com/api/v1/images"
-    headers = {"Authorization": f"Bearer {api_key}"}
 
     image_id = None
     post_id = None
@@ -421,52 +689,57 @@ async def civitai_image_by_url(request):
     if not post_id:
         post_id = (qs.get("postId") or [None])[0]
 
-    async def _call(params):
-        params = dict(params)
-        params["token"] = api_key
-        params.setdefault("nsfw", "X")  # Option A
+    page_base = _preferred_page_base(explicit_url=raw_url)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(images_api, params=params, headers=headers) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return None, {
-                        "error": "CivitAI request failed",
-                        "status": resp.status,
-                        "details": text,
-                        "params": _redact_params(params),
-                    }
-                data = await resp.json()
-                return data, None
+    async def _lookup(id_key: str, id_value: str):
+        last_err = None
+        for params in _iter_lookup_param_variants(id_key, id_value):
+            data, err = await _call_site_api_json("/images", params, api_key)
+            if err:
+                last_err = err
+                continue
+            items = data.get("items", []) if isinstance(data, dict) else []
+            if items:
+                item = dict(items[0])
+                item["pageUrl"] = _build_civitai_page_url(
+                    image_id=item.get("id") if id_key == "imageId" else None,
+                    post_id=id_value if id_key == "postId" else item.get("postId"),
+                    page_base=page_base,
+                )
+                item["sourcePageUrl"] = raw_url
+                if page_base.endswith(".red"):
+                    item["pageDomain"] = "red"
+                elif page_base.endswith(".com"):
+                    item["pageDomain"] = "com"
+                return item, None
+        return None, last_err
 
     if post_id:
-        data, err = await _call({"postId": post_id, "limit": 1})
+        item, err = await _lookup("postId", post_id)
+        if item:
+            return web.json_response({"item": item})
         if err:
             return web.json_response(err, status=err.get("status", 500))
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if items:
-            return web.json_response({"item": items[0]})
         return web.json_response(
             {
                 "error": "No items returned for postId",
                 "postId": post_id,
-                "hint": "If this is a video-only post, /api/v1/images may return empty. Otherwise it may be restricted by browsing settings.",
+                "hint": "The post may not currently expose an image through the images API, or visibility may be limited by account/domain/region settings.",
             },
             status=404,
         )
 
     if image_id:
-        data, err = await _call({"imageId": image_id, "limit": 1})
+        item, err = await _lookup("imageId", image_id)
+        if item:
+            return web.json_response({"item": item})
         if err:
             return web.json_response(err, status=err.get("status", 500))
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if items:
-            return web.json_response({"item": items[0]})
         return web.json_response(
             {
                 "error": "No items returned for imageId",
                 "imageId": image_id,
-                "hint": "This can happen for login-gated images or due to imageId lookup behavior returning empty.",
+                "hint": "This can happen for protected items or when image lookup behavior changes upstream.",
             },
             status=404,
         )
@@ -490,8 +763,17 @@ async def civitai_proxy_image(request):
     if not _is_allowed_image_url(raw_url):
         return web.json_response({"error": "URL host not allowed"}, status=400)
 
+    page_url = (request.query.get("page_url", "") or "").strip()
+    if page_url and not _is_allowed_page_url(page_url):
+        return web.json_response({"error": "page_url host not allowed"}, status=400)
+
     try:
-        img_bytes, content_type = await fetch_bytes_authed(raw_url, api_key, timeout_s=60)
+        img_bytes, content_type = await fetch_bytes_authed(
+            raw_url,
+            api_key,
+            timeout_s=60,
+            referer_url=page_url,
+        )
         return web.Response(
             body=img_bytes,
             status=200,
@@ -514,4 +796,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CivitaiInfoDisplayNode": "CivitAI Info Display",
     "CivitaiImagePreviewNode": "CivitAI Image Preview",
 }
-
