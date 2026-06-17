@@ -304,12 +304,68 @@ def _safe_int(value, default, min_value=None, max_value=None):
     return n
 
 
-def _iter_lookup_param_variants(id_key: str, id_value: str):
+def _nsfw_to_browsing_level(nsfw_value: str):
+    """Map gallery NSFW setting to Civitai browsingLevel."""
+    rating_map = {
+        "none": 1,
+        "soft": 3,
+        "mature": 7,
+        "x": 15,
+        "xxx": 31,
+        "true": 15,
+    }
+    v = str(nsfw_value or "").strip().lower()
+    return rating_map.get(v, None)
+
+
+def _normalize_tags(raw_tags):
+    """Return a clean list of tag names from a few possible API shapes."""
+    tags = []
+    if isinstance(raw_tags, list):
+        for t in raw_tags:
+            if isinstance(t, dict):
+                name = (t.get("name") or t.get("label") or "").strip()
+                if name:
+                    tags.append(name)
+            elif isinstance(t, str):
+                name = t.strip()
+                if name:
+                    tags.append(name)
+    elif isinstance(raw_tags, str):
+        for part in raw_tags.split(","):
+            name = part.strip()
+            if name:
+                tags.append(name)
+
+    deduped = []
+    seen = set()
+    for tag in tags:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tag)
+    return deduped
+
+
+def _iter_lookup_param_variants(id_key: str, id_value: str, nsfw: str = ""):
     """
     Future-proof against possible API changes around content filtering.
-    Try a few variants instead of assuming one forever.
+    Explicitly request flattened metadata + tags so prompt data is present
+    for gallery picks and URL fetches.
     """
-    base = {id_key: id_value, "limit": 1}
+    base = {
+        id_key: id_value,
+        "limit": 1,
+        "withMeta": "true",
+        "flatMeta": "true",
+        "withTags": "true",
+    }
+    level = _nsfw_to_browsing_level(nsfw)
+    if level is not None:
+        base["browsingLevel"] = level
+    if nsfw:
+        yield dict(base, nsfw=nsfw)
     yield dict(base)
     yield dict(base, nsfw="X")
     yield dict(base, nsfw="true")
@@ -372,16 +428,31 @@ class CivitaiGalleryNode:
     def _extract_prompts(self, meta: dict):
         if not isinstance(meta, dict):
             return "", ""
+
+        params = meta.get("parameters") or {}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except Exception:
+                params = {}
+        if not isinstance(params, dict):
+            params = {}
+
         positive = (
             meta.get("prompt")
             or meta.get("positivePrompt")
             or meta.get("positive")
-            or (meta.get("parameters") or {}).get("prompt", "")
+            or params.get("prompt")
+            or params.get("positivePrompt")
+            or params.get("positive")
+            or ""
         )
         negative = (
             meta.get("negativePrompt")
             or meta.get("negative")
-            or (meta.get("parameters") or {}).get("negative", "")
+            or params.get("negativePrompt")
+            or params.get("negative")
+            or ""
         )
         return positive or "", negative or ""
 
@@ -390,41 +461,26 @@ class CivitaiGalleryNode:
             data = json.loads(selection_data) if selection_data else {}
         except Exception:
             data = {}
-
+            
         item = data.get("item", {}) or {}
         image_id = item.get("id") or item.get("imageId")
         post_id = item.get("postId")
-
         meta = item.get("meta")
-        if meta is None:
+        if meta is None: 
             meta = item.get("metadata")
-        if meta is None:
+        if meta is None: 
             meta = {}
-
-        # Flatten nested meta wrapper
+            
         if isinstance(meta, dict) and isinstance(meta.get("meta"), dict):
             if not image_id and "id" in meta:
                 image_id = meta.get("id")
             meta = meta["meta"]
-
+            
         positive, negative = self._extract_prompts(meta)
-
-        page_url = (
-            item.get("page_url")
-            or item.get("pageUrl")
-            or ""
-        )
-        source_page_url = (
-            item.get("source_page_url")
-            or item.get("sourcePageUrl")
-            or ""
-        )
-        page_domain = (
-            item.get("page_domain")
-            or item.get("pageDomain")
-            or ""
-        )
-
+        page_url = item.get("page_url") or item.get("pageUrl") or ""
+        source_page_url = item.get("source_page_url") or item.get("sourcePageUrl") or ""
+        page_domain = item.get("page_domain") or item.get("pageDomain") or ""
+        
         page_base = _preferred_page_base(
             explicit_url=page_url,
             source_url=source_page_url,
@@ -432,21 +488,56 @@ class CivitaiGalleryNode:
         )
         if not page_url:
             page_url = _build_civitai_page_url(image_id, post_id, page_base=page_base)
-
+            
         tensor = _maybe_fetch_tensor_from_image_url(item.get("url"), page_url=page_url)
-
+        
+# --- FIXED MODEL NAME LOGIC WITH VARIATION FALLBACKS ---
         model_name = ""
         try:
-            res_list = meta.get("resources") or []
-            if isinstance(res_list, list) and res_list:
-                model_name = res_list[0].get("name") or ""
+            # 1. Fallback to direct top-level metadata strings
+            if not model_name:
+                direct_model = meta.get("Model type") or meta.get("Model") or meta.get("model") or meta.get("ecosystem")
+                if direct_model and isinstance(direct_model, str):
+                    model_name = direct_model.strip()
+
+            # 2. Fallback to processing resource list arrays
+            if not model_name:
+                res_list = meta.get("resources") or []
+                if isinstance(res_list, list) and res_list:
+                    for res in res_list:
+                        r_type = str(res.get("type", "")).strip().lower()
+                        r_name = str(res.get("name", "")).strip()
+                        if r_name and r_type not in ["lora", "textualinversion", "embeddings"]:
+                            model_name = r_name
+                            break
+                    if not model_name:
+                        first_type = str(res_list[0].get("type", "")).strip().lower()
+                        if first_type not in ["lora", "textualinversion", "embeddings"]:
+                            model_name = res_list[0].get("name") or ""
         except Exception:
             pass
 
-        info = f"CivitAI Page: {page_url}" + (f"\nModel: {model_name}" if model_name else "")
+        # --- SAMPLER & SCHEDULER LOGIC ---
+        sampler = meta.get("sampler") or meta.get("Sampler") or ""
+        scheduler = meta.get("scheduler") or meta.get("Scheduler") or ""
+        steps = meta.get("steps")
+        cfg = meta.get("cfgScale")
+        
+        info = f"CivitAI Page: ${page_url}"
+        if model_name:
+            info += f"\nModel: {model_name}"
+        if steps:
+            info += f"\nSteps: {steps}"
+        if cfg:
+            info += f"\nCFG: {cfg}"
+        if sampler:
+            info += f"\nSampler: {sampler}"
+        if scheduler:
+            info += f"\nScheduler: {scheduler}"
+            
         if not positive and not negative:
             info = "No prompts found.\n" + info
-
+            
         return (positive, negative, tensor, info)
 
 
@@ -632,7 +723,13 @@ async def civitai_images(request):
         "limit": limit,
         "sort": sort,
         "period": period,
+        "withMeta": "true",
+        "flatMeta": "true",
+        "withTags": "true",
     }
+    level = _nsfw_to_browsing_level(nsfw)
+    if level is not None:
+        params["browsingLevel"] = level
     if nsfw:
         params["nsfw"] = nsfw
     if cursor is not None:
@@ -693,7 +790,8 @@ async def civitai_image_by_url(request):
 
     async def _lookup(id_key: str, id_value: str):
         last_err = None
-        for params in _iter_lookup_param_variants(id_key, id_value):
+        request_nsfw = (request.query.get("nsfw", "") or "").strip()
+        for params in _iter_lookup_param_variants(id_key, id_value, nsfw=request_nsfw):
             data, err = await _call_site_api_json("/images", params, api_key)
             if err:
                 last_err = err

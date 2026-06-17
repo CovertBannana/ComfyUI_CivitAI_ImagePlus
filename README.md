@@ -1,16 +1,21 @@
+### v0.2.1 - June 2026
+- **Fixed**: Corrected metadata parsing to ensure prompts extract properly after recent Civitai metadata restructuring.
+- **Added**: Enhanced the Info block to cleanly parse and display the **Sampler**, **Scheduler**, **Steps**, **Model**, and **CFG** scales where available.
+- **Prevented**: Stopped LoRA, embedding, and textual inversion names from accidentally overwriting the primary model checkpoint name.
+
 # ComfyUI CivitAI ImagePlus
 
-**Browse CivitAI images in ComfyUI, preview protected images, edit prompts before generating, and pass selected images into img2img workflows.**
+**Browse CivitAI images in ComfyUI, preview protected images, edit prompts before generating, and pass selected images directly into img2img workflows.**
 
-**Tested on current stable ComfyUI releases (verified on 0.19.x at time of writing).**
+**Tested on current stable ComfyUI releases (verified on v0.19.x at time of writing).**
 
-ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, plus helper nodes for:
+ComfyUI_CivitAI_ImagePlus adds a CivitAI gallery browser to ComfyUI, along with helper nodes for:
 
-- **image preview with img2img connector**
-- **prompt editing**
-- **quick info display**
+- **Image preview with an img2img connector**
+- **Direct prompt editing**
+- **Quick generation info display**
 
-Nodes are populated instantly without needing to run the workflow first.
+Nodes are populated instantly via canvas actions without needing to queue the workflow first.
 
 ---
 

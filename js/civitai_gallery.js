@@ -331,10 +331,57 @@ function buildPageUrl(imageId, postId, options = {}) {
 
 function modelNameFromMeta(meta) {
   try {
+    if (!meta) return "";
+
+    // 1. Check common direct top-level strings first
+    const directModel = meta["Model type"] || meta["Model"] || meta["model"] || meta["ecosystem"];
+    if (directModel && typeof directModel === "string") {
+      return directModel.trim();
+    }
+
+    // 2. Check the standard resources array if it has items
     const res = meta?.resources;
-    if (Array.isArray(res) && res.length) return res[0]?.name || "";
+    if (Array.isArray(res) && res.length) {
+      for (const r of res) {
+        const type = String(r?.type ?? "").trim().toLowerCase();
+        const name = String(r?.name ?? "").trim();
+        if (name && type !== "lora" && type !== "textualinversion" && type !== "embeddings") {
+          return name;
+        }
+      }
+
+      const firstType = String(res[0]?.type ?? "").trim().toLowerCase();
+      if (firstType !== "lora" && firstType !== "textualinversion" && firstType !== "embeddings") {
+        return String(res[0]?.name ?? "").trim();
+      }
+    }
   } catch {}
   return "";
+}
+
+function loraNamesFromMeta(meta) {
+  try {
+    const res = meta?.resources;
+    if (!Array.isArray(res)) return [];
+
+    const names = [];
+    const seen = new Set();
+
+    for (const r of res) {
+      const type = String(r?.type ?? "").trim().toLowerCase();
+      const name = String(r?.name ?? "").trim();
+      if (!name || type !== "lora") continue;
+
+      const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        names.push(name);
+      }
+    }
+
+    return names;
+  } catch {}
+  return [];
 }
 
 async function postJSON(path, payload) {
@@ -452,7 +499,6 @@ async function setPreviewNode(node, srcUrl, pageUrl) {
 async function updateSupportNodes(normalized) {
   const graph = app?.graph;
   if (!graph || !Array.isArray(graph._nodes)) return;
-
   const prompts = extractPrompts(normalized.meta);
   const model = modelNameFromMeta(normalized.meta);
   const page = buildPageUrl(normalized.id, normalized.postId, {
@@ -461,11 +507,16 @@ async function updateSupportNodes(normalized) {
     pageDomain: normalized.pageDomain,
   });
 
-  const infoText =
-    `CivitAI Page: ${page}` +
+  const sampler = normalized.meta?.sampler || normalized.meta?.Sampler || "";
+  const scheduler = normalized.meta?.scheduler || normalized.meta?.Scheduler || "";
+
+  let infoText = `CivitAI Page: ${page}` +
     (model ? `\nModel: ${model}` : "") +
     (normalized.meta?.steps ? `\nSteps: ${normalized.meta.steps}` : "") +
     (normalized.meta?.cfgScale ? `\nCFG: ${normalized.meta.cfgScale}` : "");
+
+  if (sampler) infoText += `\nSampler: ${sampler}`;
+  if (scheduler) infoText += `\nScheduler: ${scheduler}`;
 
   for (const n of graph._nodes) {
     if (isPromptEditorNode(n)) await setPromptEditor(n, prompts.positive, prompts.negative);
