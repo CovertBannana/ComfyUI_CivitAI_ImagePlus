@@ -540,6 +540,96 @@ class CivitaiGalleryNode:
             
         return (positive, negative, tensor, info)
 
+class LocalImageInfoNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_data": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "info")
+    FUNCTION = "process"
+    CATEGORY = "CivitAI Gallery"
+
+    def process(self, image_data="", unique_id=None):
+        """
+        image_data is expected to be JSON written by the frontend JS.
+
+        Suggested shape:
+        {
+            "positive": "...",
+            "negative": "...",
+            "info": "...",
+            "meta": {...},
+            "filename": "image.png"
+        }
+        """
+        positive = ""
+        negative = ""
+        info = ""
+
+        try:
+            data = json.loads(image_data or "{}")
+            if isinstance(data, dict):
+                positive = data.get("positive", "") or ""
+                negative = data.get("negative", "") or ""
+                info = data.get("info", "") or ""
+
+                # Fallback: if frontend only sends raw metadata,
+                # try some common prompt keys.
+                meta = data.get("meta", {})
+                if isinstance(meta, dict):
+                    positive = positive or meta.get("prompt", "") or meta.get("positivePrompt", "") or meta.get("positive", "")
+                    negative = negative or meta.get("negativePrompt", "") or meta.get("negative", "")
+
+                    if not info:
+                        parts = []
+                        filename = data.get("filename", "")
+                        if filename:
+                            parts.append(f"File: {filename}")
+
+                        model = (
+                            meta.get("Model")
+                            or meta.get("model")
+                            or meta.get("Model type")
+                            or meta.get("ecosystem")
+                            or ""
+                        )
+                        if model:
+                            parts.append(f"Model: {model}")
+
+                        steps = meta.get("steps") or meta.get("Steps")
+                        cfg = meta.get("cfgScale") or meta.get("CFG scale") or meta.get("CFG")
+                        sampler = meta.get("sampler") or meta.get("Sampler")
+                        scheduler = meta.get("scheduler") or meta.get("Scheduler")
+
+                        if steps:
+                            parts.append(f"Steps: {steps}")
+                        if cfg:
+                            parts.append(f"CFG: {cfg}")
+                        if sampler:
+                            parts.append(f"Sampler: {sampler}")
+                        if scheduler:
+                            parts.append(f"Scheduler: {scheduler}")
+
+                        info = "\n".join(parts)
+
+        except Exception as e:
+            info = f"Local Image Info parse error: {e}"
+
+        return (positive, negative, info)
 
 class CivitaiPromptEditorNode:
     """
@@ -570,7 +660,6 @@ class CivitaiPromptEditorNode:
         uid = str(unique_id) if unique_id is not None else ""
         entry = PROMPT_STORE.get(uid) or {}
         return (entry.get("positive", "") or "", entry.get("negative", "") or "")
-
 
 class CivitaiInfoDisplayNode:
     """
@@ -886,6 +975,7 @@ NODE_CLASS_MAPPINGS = {
     "CivitaiPromptEditorNode": CivitaiPromptEditorNode,
     "CivitaiInfoDisplayNode": CivitaiInfoDisplayNode,
     "CivitaiImagePreviewNode": CivitaiImagePreviewNode,
+    "LocalImageInfoNode": LocalImageInfoNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -893,4 +983,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CivitaiPromptEditorNode": "CivitAI Prompt Editor",
     "CivitaiInfoDisplayNode": "CivitAI Info Display",
     "CivitaiImagePreviewNode": "CivitAI Image Preview",
+    "LocalImageInfoNode": "CivitAI Local Image Info",
 }

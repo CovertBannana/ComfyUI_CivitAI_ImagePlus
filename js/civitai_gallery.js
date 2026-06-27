@@ -271,6 +271,10 @@ function isPreviewNode(node) {
   const title = String(node?.title || node?.comfyClass || "").toLowerCase();
   return node?.comfyClass === "CivitaiImagePreviewNode" || title.includes("civitai image preview");
 }
+function isLocalImageInfoNode(node) {
+  const title = String(node?.title || node?.comfyClass || "").toLowerCase();
+  return node?.comfyClass === "LocalImageInfoNode" || title.includes("local image info");
+}
 
 // ---------------- Data helpers ----------------
 function normalizeItemForSelection(item) {
@@ -477,21 +481,31 @@ async function setPreviewNode(node, srcUrl, pageUrl) {
   node.__civitaiPageUrl = pageUrl ?? "";
   node.__civitaiSourceUrl = srcUrl ?? "";
 
-  await postJSON("/civitai_gallery/set_preview", {
-    node_id: String(node.id),
-    url: node.__civitaiSourceUrl,
-    page_url: node.__civitaiPageUrl,
-  });
+  const isLocalObjectUrl =
+    typeof srcUrl === "string" &&
+    (srcUrl.startsWith("blob:") || srcUrl.startsWith("data:"));
 
-  const proxyUrl = buildProxyImageUrl(node.__civitaiSourceUrl, node.__civitaiPageUrl);
+  if (!isLocalObjectUrl) {
+    await postJSON("/civitai_gallery/set_preview", {
+      node_id: String(node.id),
+      url: node.__civitaiSourceUrl,
+      page_url: node.__civitaiPageUrl,
+    });
+  }
 
-  node.__civitaiThumbUrl = proxyUrl;
+  const previewUrl = isLocalObjectUrl
+    ? srcUrl
+    : buildProxyImageUrl(node.__civitaiSourceUrl, node.__civitaiPageUrl);
+
+  node.__civitaiThumbUrl = previewUrl;
+
   if (!node.__civitaiThumbImg) {
     node.__civitaiThumbImg = new Image();
     node.__civitaiThumbImg.onload = () => node.graph?.setDirtyCanvas(true, true);
     node.__civitaiThumbImg.onerror = () => node.graph?.setDirtyCanvas(true, true);
   }
-  node.__civitaiThumbImg.src = proxyUrl;
+
+  node.__civitaiThumbImg.src = previewUrl;
   node.graph?.setDirtyCanvas(true, true);
 }
 
@@ -510,13 +524,18 @@ async function updateSupportNodes(normalized) {
   const sampler = normalized.meta?.sampler || normalized.meta?.Sampler || "";
   const scheduler = normalized.meta?.scheduler || normalized.meta?.Scheduler || "";
 
-  let infoText = `CivitAI Page: ${page}` +
+let infoText = normalized.infoText || "";
+
+if (!infoText) {
+  infoText =
+    `CivitAI Page: ${page}` +
     (model ? `\nModel: ${model}` : "") +
     (normalized.meta?.steps ? `\nSteps: ${normalized.meta.steps}` : "") +
     (normalized.meta?.cfgScale ? `\nCFG: ${normalized.meta.cfgScale}` : "");
 
   if (sampler) infoText += `\nSampler: ${sampler}`;
   if (scheduler) infoText += `\nScheduler: ${scheduler}`;
+}
 
   for (const n of graph._nodes) {
     if (isPromptEditorNode(n)) await setPromptEditor(n, prompts.positive, prompts.negative);
@@ -927,6 +946,1303 @@ async function fetchAndApplyUrl(node, url) {
   }
 }
 
+async function openLocalImagePicker(node) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg,image/webp,image/*";
+  input.style.display = "none";
+
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    input.remove();
+
+    if (!file) return;
+
+    await handleLocalImageFile(node, file);
+  };
+
+  document.body.appendChild(input);
+  input.click();
+}
+
+function getCanvasPosFromDragEvent(e) {
+  try {
+    const canvas = app?.canvas;
+    if (!canvas) return null;
+
+    // LiteGraph/Comfy commonly exposes this helper.
+    if (typeof canvas.convertEventToCanvasOffset === "function") {
+      return canvas.convertEventToCanvasOffset(e);
+    }
+
+    // Fallback calculation.
+    const rect = canvas.canvas?.getBoundingClientRect?.();
+    if (!rect) return null;
+
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const ds = canvas.ds;
+    if (ds && Array.isArray(ds.offset)) {
+      return [
+        x / ds.scale - ds.offset[0],
+        y / ds.scale - ds.offset[1],
+      ];
+    }
+
+    return [x, y];
+  } catch {
+    return null;
+  }
+}
+
+function findLocalImageInfoNodeAtEvent(e) {
+  const graph = app?.graph;
+  if (!graph || !Array.isArray(graph._nodes)) return null;
+
+  const pos = getCanvasPosFromDragEvent(e);
+  if (!pos) return null;
+
+  const [x, y] = pos;
+
+  // Walk backwards so top-most nodes win.
+  for (let i = graph._nodes.length - 1; i >= 0; i--) {
+    const n = graph._nodes[i];
+    if (!isLocalImageInfoNode(n)) continue;
+
+    const nx = n.pos?.[0] ?? 0;
+    const ny = n.pos?.[1] ?? 0;
+    const nw = n.size?.[0] ?? 0;
+    const nh = n.size?.[1] ?? 0;
+
+    if (x >= nx && x <= nx + nw && y >= ny && y <= ny + nh) {
+      return n;
+    }
+  }
+
+  return null;
+}
+
+function installLocalImageDropGuard() {
+  if (window.__localImageInfoDropGuardInstalled) return;
+  window.__localImageInfoDropGuardInstalled = true;
+
+  const hasImageFile = (e) => {
+    const items = Array.from(e.dataTransfer?.items || []);
+    return items.some((item) => item.kind === "file" && item.type?.startsWith("image/"));
+  };
+
+  document.addEventListener(
+    "dragover",
+    (e) => {
+      const node = findLocalImageInfoNodeAtEvent(e);
+      if (!node || !hasImageFile(e)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      e.dataTransfer.dropEffect = "copy";
+
+      node.__localImageInfoDragOver = true;
+      node.graph?.setDirtyCanvas(true, true);
+    },
+    true
+  );
+
+  document.addEventListener(
+    "dragleave",
+    (e) => {
+      const graph = app?.graph;
+      if (!graph || !Array.isArray(graph._nodes)) return;
+
+      for (const n of graph._nodes) {
+        if (isLocalImageInfoNode(n) && n.__localImageInfoDragOver) {
+          n.__localImageInfoDragOver = false;
+          n.graph?.setDirtyCanvas(true, true);
+        }
+      }
+    },
+    true
+  );
+
+  document.addEventListener(
+    "drop",
+    async (e) => {
+      const node = findLocalImageInfoNodeAtEvent(e);
+      if (!node || !hasImageFile(e)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      node.__localImageInfoDragOver = false;
+
+      const files = Array.from(e.dataTransfer?.files || []);
+      const file = files.find((f) => f.type?.startsWith("image/"));
+
+      if (file) {
+        await handleLocalImageFile(node, file);
+      }
+
+      node.graph?.setDirtyCanvas(true, true);
+    },
+    true
+  );
+}
+
+installLocalImageDropGuard();
+
+// ---------------- Local Image Info helpers ----------------
+
+async function readFileAsArrayBuffer(file) {
+  return await file.arrayBuffer();
+}
+
+function decodeLatin1(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) {
+    s += String.fromCharCode(bytes[i]);
+  }
+  return s;
+}
+
+function decodeUtf8(bytes) {
+  try {
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    return decodeLatin1(bytes);
+  }
+}
+
+function readUint32BE(view, offset) {
+  return view.getUint32(offset, false);
+}
+
+function parsePngMetadata(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+
+  const pngSig = [137, 80, 78, 71, 13, 10, 26, 10];
+
+  for (let i = 0; i < pngSig.length; i++) {
+    if (bytes[i] !== pngSig[i]) return {};
+  }
+
+  const meta = {};
+  let offset = 8;
+
+  while (offset + 8 <= bytes.length) {
+    const length = readUint32BE(view, offset);
+    offset += 4;
+
+    const type = decodeLatin1(bytes.slice(offset, offset + 4));
+    offset += 4;
+
+    const dataStart = offset;
+    const dataEnd = offset + length;
+    const data = bytes.slice(dataStart, dataEnd);
+
+    offset = dataEnd + 4; // skip CRC
+
+    if (type === "tEXt") {
+      const nul = data.indexOf(0);
+
+      if (nul > -1) {
+        const key = decodeLatin1(data.slice(0, nul));
+        const value = decodeLatin1(data.slice(nul + 1));
+        meta[key] = value;
+      }
+    }
+
+    if (type === "iTXt") {
+      let p = 0;
+      const nul1 = data.indexOf(0, p);
+
+      if (nul1 > -1) {
+        const key = decodeUtf8(data.slice(p, nul1));
+        p = nul1 + 1;
+
+        const compressionFlag = data[p];
+        p += 1;
+
+        // compression method
+        p += 1;
+
+        const nulLang = data.indexOf(0, p);
+
+        if (nulLang > -1) {
+          p = nulLang + 1;
+
+          const nulTranslated = data.indexOf(0, p);
+
+          if (nulTranslated > -1) {
+            p = nulTranslated + 1;
+
+            // Only uncompressed iTXt for now.
+            if (compressionFlag === 0) {
+              meta[key] = decodeUtf8(data.slice(p));
+            }
+          }
+        }
+      }
+    }
+
+    if (type === "IEND") break;
+  }
+
+  return meta;
+}
+function cleanExifText(value) {
+  return String(value || "")
+    .replace(/^ASCII\x00\x00\x00/, "")
+    .replace(/\0/g, "")
+    .trim();
+}
+
+function parseJpegExifMetadata(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+  const meta = {};
+
+  // JPEG SOI marker
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return meta;
+  }
+
+  function readAscii(start, length) {
+    let s = "";
+
+    for (let i = 0; i < length && start + i < bytes.length; i++) {
+      s += String.fromCharCode(bytes[start + i]);
+    }
+
+    return s;
+  }
+
+  function parseExifSegment(segmentStart, segmentLength) {
+    // EXIF payload should start with Exif\0\0
+    if (readAscii(segmentStart, 6) !== "Exif\0\0") {
+      return;
+    }
+
+    const tiffStart = segmentStart + 6;
+    const endian = readAscii(tiffStart, 2);
+
+    const little = endian === "II";
+    const big = endian === "MM";
+
+    if (!little && !big) {
+      return;
+    }
+
+    const read16 = (offset) => view.getUint16(offset, little);
+    const read32 = (offset) => view.getUint32(offset, little);
+
+    const firstIfdOffset = read32(tiffStart + 4);
+
+    function readExifValue(type, count, valueOffsetField) {
+      const typeSize =
+        {
+          1: 1, // BYTE
+          2: 1, // ASCII
+          3: 2, // SHORT
+          4: 4, // LONG
+          7: 1, // UNDEFINED
+        }[type] || 1;
+
+      const totalBytes = typeSize * count;
+
+      let valueStart;
+
+      if (totalBytes <= 4) {
+        valueStart = valueOffsetField;
+      } else {
+        const realOffset = read32(valueOffsetField);
+        valueStart = tiffStart + realOffset;
+      }
+
+      if (valueStart < 0 || valueStart >= bytes.length) {
+        return "";
+      }
+
+      if (type === 2 || type === 7 || type === 1) {
+        return cleanExifText(readAscii(valueStart, totalBytes));
+      }
+
+      return "";
+    }
+
+    function readIfd(ifdRelativeOffset) {
+      const ifdStart = tiffStart + ifdRelativeOffset;
+
+      if (ifdStart < 0 || ifdStart + 2 >= bytes.length) {
+        return;
+      }
+
+      const entryCount = read16(ifdStart);
+
+      for (let i = 0; i < entryCount; i++) {
+        const entry = ifdStart + 2 + i * 12;
+
+        if (entry + 12 > bytes.length) {
+          continue;
+        }
+
+        const tag = read16(entry);
+        const type = read16(entry + 2);
+        const count = read32(entry + 4);
+        const valueOffsetField = entry + 8;
+
+        // 270 = ImageDescription
+        if (tag === 270) {
+          const value = readExifValue(type, count, valueOffsetField);
+
+          if (value) {
+            meta.Description = value;
+          }
+        }
+
+        // 37510 = UserComment
+        if (tag === 37510) {
+          const value = readExifValue(type, count, valueOffsetField);
+
+          if (value) {
+            meta.UserComment = value;
+          }
+        }
+
+        // 34665 = ExifIFDPointer
+        if (tag === 34665) {
+          const subIfdOffset = read32(valueOffsetField);
+
+          if (subIfdOffset) {
+            readIfd(subIfdOffset);
+          }
+        }
+      }
+    }
+
+    readIfd(firstIfdOffset);
+  }
+
+  let offset = 2;
+
+  while (offset + 4 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      break;
+    }
+
+    const marker = bytes[offset + 1];
+
+    // Start of Scan or End of Image
+    if (marker === 0xda || marker === 0xd9) {
+      break;
+    }
+
+    const segmentLength = view.getUint16(offset + 2, false);
+    const segmentStart = offset + 4;
+    const segmentDataLength = segmentLength - 2;
+
+    // APP1 = EXIF
+    if (marker === 0xe1) {
+      parseExifSegment(segmentStart, segmentDataLength);
+    }
+
+    offset += 2 + segmentLength;
+  }
+
+  const candidate = meta.UserComment || meta.Description || "";
+
+  if (
+    candidate &&
+    (
+      candidate.includes("Negative prompt:") ||
+      candidate.includes("Steps:") ||
+      candidate.includes("Sampler:") ||
+      candidate.includes("CFG scale:")
+    )
+  ) {
+    meta.parameters = candidate;
+  }
+
+  return meta;
+}
+
+function tryParseJson(value) {
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function parseAutomatic1111Parameters(parametersText) {
+  const raw = String(parametersText || "").trim();
+  if (!raw) return {};
+
+  const meta = {
+    raw_parameters: raw,
+  };
+
+  const negativeMarker = "Negative prompt:";
+  const stepsMarker = "Steps:";
+
+  const negIdx = raw.indexOf(negativeMarker);
+  const stepsIdx = raw.indexOf(stepsMarker);
+
+  if (negIdx >= 0) {
+    meta.prompt = raw.slice(0, negIdx).trim();
+
+    if (stepsIdx >= 0 && stepsIdx > negIdx) {
+      meta.negativePrompt = raw
+        .slice(negIdx + negativeMarker.length, stepsIdx)
+        .trim()
+        .replace(/,$/, "");
+    } else {
+      meta.negativePrompt = raw.slice(negIdx + negativeMarker.length).trim();
+    }
+  } else if (stepsIdx >= 0) {
+    meta.prompt = raw.slice(0, stepsIdx).trim();
+  } else {
+    meta.prompt = raw;
+  }
+
+  const settingsText = stepsIdx >= 0 ? raw.slice(stepsIdx) : "";
+
+  if (settingsText) {
+    const parts = settingsText.split(",").map((p) => p.trim());
+
+    for (const part of parts) {
+      const colon = part.indexOf(":");
+      if (colon <= 0) continue;
+
+      const key = part.slice(0, colon).trim();
+      const value = part.slice(colon + 1).trim();
+      const lower = key.toLowerCase();
+
+      if (lower === "steps") meta.steps = value;
+      else if (lower === "sampler") meta.sampler = value;
+      else if (lower === "schedule type" || lower === "scheduler") meta.scheduler = value;
+      else if (lower === "cfg scale") meta.cfgScale = value;
+      else if (lower === "seed") meta.seed = value;
+      else if (lower === "size") meta.size = value;
+      else if (lower === "model") meta.Model = value;
+      else if (lower === "model hash") meta.modelHash = value;
+      else meta[key] = value;
+    }
+  }
+
+  return meta;
+}
+
+function extractPromptsFromCivitaiSelectionData(promptJson) {
+  const result = {
+    positive: "",
+    negative: "",
+  };
+
+  if (!promptJson || typeof promptJson !== "object") {
+    return result;
+  }
+
+  for (const node of Object.values(promptJson)) {
+    if (!node || typeof node !== "object") continue;
+
+    const classType = String(node.class_type || "");
+    if (classType !== "CivitaiGalleryNode") continue;
+
+    const selectionData = node.inputs?.selection_data;
+    if (typeof selectionData !== "string" || !selectionData.trim()) continue;
+
+    try {
+      const parsed = JSON.parse(selectionData);
+      const meta = parsed?.item?.meta || {};
+
+      if (!result.positive) {
+        result.positive =
+          meta.prompt ||
+          meta.positivePrompt ||
+          meta.positive ||
+          "";
+      }
+
+      if (!result.negative) {
+        result.negative =
+          meta.negativePrompt ||
+          meta.negative ||
+          "";
+      }
+
+      if (result.positive || result.negative) {
+        return result;
+      }
+    } catch {}
+  }
+
+  return result;
+}
+
+function extractComfyPromptsFromPromptJson(promptJson) {
+  const result = {
+    positive: "",
+    negative: "",
+  };
+
+  if (!promptJson || typeof promptJson !== "object") {
+    return result;
+  }
+
+  const nodes = promptJson;
+
+const getNodeText = (node) => {
+  const text = node?.inputs?.text;
+
+  // Direct prompt text.
+  if (typeof text === "string") {
+    return text;
+  }
+
+  // Detect link info
+  if (Array.isArray(text)) {
+    return "";
+  }
+
+  return "";
+};
+
+  const isTextEncodeNode = (node) => {
+    const classType = String(node?.class_type || "").toLowerCase();
+    const title = String(node?._meta?.title || "").toLowerCase();
+
+    return (
+      classType.includes("cliptextencode") ||
+      classType.includes("textencode") ||
+      title.includes("clip text encode") ||
+      title.includes("positive prompt") ||
+      title.includes("negative prompt")
+    );
+  };
+
+  // 1. Title-based extraction.
+  for (const node of Object.values(nodes)) {
+    if (!node || typeof node !== "object") continue;
+    if (!isTextEncodeNode(node)) continue;
+
+    const title = String(node?._meta?.title || "").toLowerCase();
+    const text = getNodeText(node);
+
+    if (!text) continue;
+
+    if (!result.positive && title.includes("positive")) {
+      result.positive = text;
+    }
+
+    if (!result.negative && title.includes("negative")) {
+      result.negative = text;
+    }
+  }
+
+  // 2. KSampler link-based extraction.
+  for (const node of Object.values(nodes)) {
+    if (!node || typeof node !== "object") continue;
+
+    const classType = String(node.class_type || "").toLowerCase();
+
+    if (!classType.includes("ksampler")) continue;
+
+    const positiveLink = node.inputs?.positive;
+    const negativeLink = node.inputs?.negative;
+
+    if (!result.positive && Array.isArray(positiveLink)) {
+      const positiveNodeId = String(positiveLink[0]);
+      const positiveNode = nodes[positiveNodeId];
+      const text = getNodeText(positiveNode);
+
+      if (text) {
+        result.positive = text;
+      }
+    }
+
+    if (!result.negative && Array.isArray(negativeLink)) {
+      const negativeNodeId = String(negativeLink[0]);
+      const negativeNode = nodes[negativeNodeId];
+      const text = getNodeText(negativeNode);
+
+      if (text) {
+        result.negative = text;
+      }
+    }
+  }
+
+  // 3. Fallback: first/second text encode nodes.
+  if (!result.positive || !result.negative) {
+    const textNodes = [];
+
+    for (const node of Object.values(nodes)) {
+      if (!node || typeof node !== "object") continue;
+      if (!isTextEncodeNode(node)) continue;
+
+      const text = getNodeText(node);
+
+      if (text) {
+        textNodes.push(text);
+      }
+    }
+
+    if (!result.positive && textNodes[0]) {
+      result.positive = textNodes[0];
+    }
+
+    if (!result.negative && textNodes[1]) {
+      result.negative = textNodes[1];
+    }
+  }
+
+  if (!result.positive || !result.negative) {
+    const civitaiPrompts = extractPromptsFromCivitaiSelectionData(promptJson);
+
+    if (!result.positive && civitaiPrompts.positive) {
+      result.positive = civitaiPrompts.positive;
+    }
+
+    if (!result.negative && civitaiPrompts.negative) {
+      result.negative = civitaiPrompts.negative;
+    }
+  }
+
+  return result;
+}
+
+function extractComfyPromptsFromWorkflowJson(workflowJson) {
+  const result = {
+    positive: "",
+    negative: "",
+  };
+
+  const nodes = Array.isArray(workflowJson?.nodes) ? workflowJson.nodes : [];
+  const links = Array.isArray(workflowJson?.links) ? workflowJson.links : [];
+
+  if (!nodes.length) {
+    return result;
+  }
+
+  const nodeById = new Map();
+
+  for (const node of nodes) {
+    nodeById.set(String(node.id), node);
+  }
+
+  const linkById = new Map();
+
+  for (const link of links) {
+    // Comfy workflow links are usually:
+    // [link_id, origin_node_id, origin_slot, target_node_id, target_slot, type]
+    if (Array.isArray(link) && link.length >= 6) {
+      linkById.set(String(link[0]), {
+        id: link[0],
+        originNodeId: String(link[1]),
+        originSlot: link[2],
+        targetNodeId: String(link[3]),
+        targetSlot: link[4],
+        type: link[5],
+      });
+    }
+  }
+
+  const isTextEncodeNode = (node) => {
+    const type = String(node?.type || node?.class_type || "").toLowerCase();
+    const title = String(node?.title || node?._meta?.title || "").toLowerCase();
+
+    return (
+      type.includes("cliptextencode") ||
+      type.includes("textencode") ||
+      title.includes("clip text encode") ||
+      title.includes("positive prompt") ||
+      title.includes("negative prompt")
+    );
+  };
+
+  const getWidgetText = (node) => {
+    const values = Array.isArray(node?.widgets_values) ? node.widgets_values : [];
+
+    const strings = values
+      .filter((v) => typeof v === "string")
+      .map((v) => v.trim())
+      .filter(Boolean);
+
+    if (!strings.length) return "";
+
+    // Most CLIPTextEncode nodes have the prompt as the first string widget.
+    return strings.join("\n");
+  };
+
+  const getLinkedOriginNodeForInput = (node, inputName) => {
+    const inputs = Array.isArray(node?.inputs) ? node.inputs : [];
+
+    const input = inputs.find((i) => String(i?.name || "").toLowerCase() === inputName);
+
+    if (!input || input.link == null) {
+      return null;
+    }
+
+    const linkInfo = linkById.get(String(input.link));
+
+    if (!linkInfo) {
+      return null;
+    }
+
+    return nodeById.get(String(linkInfo.originNodeId)) || null;
+  };
+
+  // 1. Title-based extraction.
+  for (const node of nodes) {
+    if (!isTextEncodeNode(node)) continue;
+
+    const title = String(node?.title || node?._meta?.title || "").toLowerCase();
+    const text = getWidgetText(node);
+
+    if (!text) continue;
+
+    if (!result.positive && title.includes("positive")) {
+      result.positive = text;
+    }
+
+    if (!result.negative && title.includes("negative")) {
+      result.negative = text;
+    }
+  }
+
+  // 2. KSampler link-based extraction.
+  for (const node of nodes) {
+    const type = String(node?.type || node?.class_type || "").toLowerCase();
+
+    if (!type.includes("ksampler")) continue;
+
+    const positiveNode = getLinkedOriginNodeForInput(node, "positive");
+    const negativeNode = getLinkedOriginNodeForInput(node, "negative");
+
+    if (!result.positive && positiveNode) {
+      const text = getWidgetText(positiveNode);
+
+      if (text) {
+        result.positive = text;
+      }
+    }
+
+    if (!result.negative && negativeNode) {
+      const text = getWidgetText(negativeNode);
+
+      if (text) {
+        result.negative = text;
+      }
+    }
+  }
+
+  // 3. Fallback: first/second text encode nodes.
+  if (!result.positive || !result.negative) {
+    const textNodes = nodes
+      .filter(isTextEncodeNode)
+      .map(getWidgetText)
+      .filter(Boolean);
+
+    if (!result.positive && textNodes[0]) {
+      result.positive = textNodes[0];
+    }
+
+    if (!result.negative && textNodes[1]) {
+      result.negative = textNodes[1];
+    }
+  }
+
+  return result;
+}
+
+function extractComfyGenerationInfoFromWorkflowJson(workflowJson) {
+  const info = {};
+  const nodes = Array.isArray(workflowJson?.nodes) ? workflowJson.nodes : [];
+
+  for (const node of nodes) {
+    const type = String(node?.type || node?.class_type || "");
+    const values = Array.isArray(node?.widgets_values) ? node.widgets_values : [];
+
+    if (type === "UNETLoader") {
+      if (values[0] && !info.unet_name) info.unet_name = String(values[0]);
+      if (values[1] && !info.weight_dtype) info.weight_dtype = String(values[1]);
+    }
+
+    if (type === "CheckpointLoaderSimple") {
+      if (values[0] && !info.ckpt_name) info.ckpt_name = String(values[0]);
+    }
+
+    if (type === "VAELoader") {
+      if (values[0] && !info.vae_name) info.vae_name = String(values[0]);
+    }
+
+    if (type === "CLIPLoaderGGUF") {
+      if (values[0] && !info.clip_name) info.clip_name = String(values[0]);
+      if (values[1] && !info.clip_type) info.clip_type = String(values[1]);
+    }
+
+    if (type === "KSampler") {
+      // Common KSampler widget order:
+      // seed, control_after_generate, steps, cfg, sampler_name, scheduler, denoise
+      if (values[0] != null && info.seed == null) info.seed = String(values[0]);
+      if (values[2] != null && info.steps == null) info.steps = String(values[2]);
+      if (values[3] != null && info.cfgScale == null) info.cfgScale = String(values[3]);
+      if (values[4] && !info.sampler) info.sampler = String(values[4]);
+      if (values[5] && !info.scheduler) info.scheduler = String(values[5]);
+      if (values[6] != null && info.denoise == null) info.denoise = String(values[6]);
+    }
+  }
+
+  return info;
+}
+
+function extractComfyGenerationInfoFromPromptJson(promptJson) {
+  const info = {};
+
+  if (!promptJson || typeof promptJson !== "object") {
+    return info;
+  }
+
+  for (const node of Object.values(promptJson)) {
+    if (!node || typeof node !== "object") continue;
+
+    const classType = String(node.class_type || "");
+    const inputs = node.inputs || {};
+
+    // UNETLoader
+    if (classType === "UNETLoader") {
+      if (inputs.unet_name && !info.unet_name) {
+        info.unet_name = String(inputs.unet_name);
+      }
+      if (inputs.weight_dtype && !info.weight_dtype) {
+        info.weight_dtype = String(inputs.weight_dtype);
+      }
+    }
+
+    // CheckpointLoaderSimple
+    if (classType === "CheckpointLoaderSimple") {
+      if (inputs.ckpt_name && !info.ckpt_name) {
+        info.ckpt_name = String(inputs.ckpt_name);
+      }
+    }
+
+    // VAELoader
+    if (classType === "VAELoader") {
+      if (inputs.vae_name && !info.vae_name) {
+        info.vae_name = String(inputs.vae_name);
+      }
+    }
+
+    // CLIPLoaderGGUF
+    if (classType === "CLIPLoaderGGUF") {
+      if (inputs.clip_name && !info.clip_name) {
+        info.clip_name = String(inputs.clip_name);
+      }
+      if (inputs.type && !info.clip_type) {
+        info.clip_type = String(inputs.type);
+      }
+    }
+
+    // KSampler
+    if (classType === "KSampler") {
+      if (inputs.seed != null && info.seed == null) {
+        info.seed = String(inputs.seed);
+      }
+      if (inputs.steps != null && info.steps == null) {
+        info.steps = String(inputs.steps);
+      }
+      if (inputs.cfg != null && info.cfgScale == null) {
+        info.cfgScale = String(inputs.cfg);
+      }
+      if (inputs.sampler_name && !info.sampler) {
+        info.sampler = String(inputs.sampler_name);
+      }
+      if (inputs.scheduler && !info.scheduler) {
+        info.scheduler = String(inputs.scheduler);
+      }
+      if (inputs.denoise != null && info.denoise == null) {
+        info.denoise = String(inputs.denoise);
+      }
+    }
+  }
+
+  return info;
+}
+
+function assignMissing(target, source) {
+  for (const [k, v] of Object.entries(source || {})) {
+    if (
+      typeof v !== "undefined" &&
+      v !== null &&
+      v !== "" &&
+      (typeof target[k] === "undefined" || target[k] === null || target[k] === "")
+    ) {
+      target[k] = v;
+    }
+  }
+}
+
+function normalizeLocalImageMetadata(rawMeta) {
+  const meta = {};
+
+  for (const [k, v] of Object.entries(rawMeta || {})) {
+    meta[k] = v;
+  }
+
+  const promptJson =
+    tryParseJson(rawMeta?.prompt) ||
+    tryParseJson(rawMeta?.Prompt) ||
+    null;
+
+  const workflowJson =
+    tryParseJson(rawMeta?.workflow) ||
+    tryParseJson(rawMeta?.Workflow) ||
+    null;
+
+  if (promptJson) {
+    meta.comfy_prompt = promptJson;
+
+    const comfyPrompts = extractComfyPromptsFromPromptJson(promptJson);
+    const comfyInfo = extractComfyGenerationInfoFromPromptJson(promptJson);
+
+    meta.prompt = comfyPrompts.positive || "";
+    meta.negativePrompt = comfyPrompts.negative || "";
+
+    assignMissing(meta, comfyInfo);
+  }
+
+  if (workflowJson) {
+    meta.comfy_workflow = workflowJson;
+
+    const workflowPrompts = extractComfyPromptsFromWorkflowJson(workflowJson);
+    const workflowInfo = extractComfyGenerationInfoFromWorkflowJson(workflowJson);
+
+    if (!meta.prompt && workflowPrompts.positive) {
+      meta.prompt = workflowPrompts.positive;
+    }
+
+    if (!meta.negativePrompt && workflowPrompts.negative) {
+      meta.negativePrompt = workflowPrompts.negative;
+    }
+
+    assignMissing(meta, workflowInfo);
+  }
+
+  if (!meta.Model) {
+    meta.Model = meta.ckpt_name || meta.unet_name || "";
+  }
+
+  const parameters =
+    rawMeta?.parameters ||
+    rawMeta?.Parameters ||
+    rawMeta?.Description ||
+    rawMeta?.UserComment ||
+    "";
+
+  if (parameters && typeof parameters === "string") {
+    const parsedParams = parseAutomatic1111Parameters(parameters);
+
+    // A1111 params should fill blanks, but should not overwrite good ComfyUI extracted prompts.
+    assignMissing(meta, parsedParams);
+  }
+
+  if (!meta.prompt) {
+    meta.prompt =
+      rawMeta?.positive ||
+      rawMeta?.Positive ||
+      rawMeta?.positivePrompt ||
+      rawMeta?.PositivePrompt ||
+      "";
+  }
+
+  if (!meta.negativePrompt) {
+    meta.negativePrompt =
+      rawMeta?.negative ||
+      rawMeta?.Negative ||
+      rawMeta?.negativePrompt ||
+      rawMeta?.NegativePrompt ||
+      "";
+  }
+
+  // Safety: never send full Comfy JSON graph to the Prompt Editor.
+  if (typeof meta.prompt === "string") {
+    const trimmed = meta.prompt.trim();
+
+    if (
+      trimmed.startsWith("{") &&
+      trimmed.includes("class_type") &&
+      trimmed.includes("inputs")
+    ) {
+      meta.prompt = "";
+    }
+  }
+
+  if (typeof meta.negativePrompt === "string") {
+    const trimmed = meta.negativePrompt.trim();
+
+    if (
+      trimmed.startsWith("{") &&
+      trimmed.includes("class_type") &&
+      trimmed.includes("inputs")
+    ) {
+      meta.negativePrompt = "";
+    }
+  }
+
+  return meta;
+}
+
+function buildLocalInfoText({ file, meta }) {
+  const lines = [];
+
+  lines.push("Source: Local image");
+
+  if (file?.name) lines.push(`File: ${file.name}`);
+  if (file?.type) lines.push(`Type: ${file.type}`);
+  if (file?.size != null) lines.push(`Size: ${file.size} bytes`);
+
+  const model =
+    meta?.Model ||
+    meta?.model ||
+    meta?.["Model type"] ||
+    meta?.ckpt_name ||
+    meta?.unet_name ||
+    meta?.ecosystem ||
+    "";
+
+  const checkpoint = meta?.ckpt_name || "";
+  const unet = meta?.unet_name || "";
+  const weightDtype = meta?.weight_dtype || "";
+  const vae = meta?.vae_name || "";
+  const clip = meta?.clip_name || "";
+  const clipType = meta?.clip_type || "";
+
+  const steps = meta?.steps || meta?.Steps || "";
+  const cfg = meta?.cfgScale || meta?.["CFG scale"] || meta?.CFG || "";
+  const sampler = meta?.sampler || meta?.Sampler || "";
+  const scheduler = meta?.scheduler || meta?.Scheduler || "";
+  const seed = meta?.seed || meta?.Seed || "";
+  const denoise = meta?.denoise || "";
+  const imageSize = meta?.size || meta?.Size || "";
+
+  if (model) {
+    lines.push(`Model: ${model}`);
+  }
+
+  if (checkpoint && checkpoint !== model) {
+    lines.push(`Checkpoint: ${checkpoint}`);
+  }
+
+  if (unet && unet !== model) {
+    lines.push(`UNET: ${unet}`);
+  }
+
+  if (weightDtype) {
+    lines.push(`Weight dtype: ${weightDtype}`);
+  }
+
+  if (vae) {
+    lines.push(`VAE: ${vae}`);
+  }
+
+  if (clip) {
+    lines.push(`CLIP: ${clip}`);
+  }
+
+  if (clipType) {
+    lines.push(`CLIP Type: ${clipType}`);
+  }
+
+  if (steps) {
+    lines.push(`Steps: ${steps}`);
+  }
+
+  if (cfg) {
+    lines.push(`CFG: ${cfg}`);
+  }
+
+  if (sampler) {
+    lines.push(`Sampler: ${sampler}`);
+  }
+
+  if (scheduler) {
+    lines.push(`Scheduler: ${scheduler}`);
+  }
+
+  if (seed) {
+    lines.push(`Seed: ${seed}`);
+  }
+
+  if (denoise) {
+    lines.push(`Denoise: ${denoise}`);
+  }
+
+  if (imageSize) {
+    lines.push(`Image Size: ${imageSize}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function handleLocalImageFile(node, file) {
+  if (!file || !file.type?.startsWith("image/")) {
+    alert("Please choose an image file.");
+    return;
+  }
+
+  try {
+    const arrayBuffer = await readFileAsArrayBuffer(file);
+
+let rawMeta = {};
+
+const fileNameLower = file.name.toLowerCase();
+
+if (file.type === "image/png" || fileNameLower.endsWith(".png")) {
+  rawMeta = parsePngMetadata(arrayBuffer);
+} else if (
+  file.type === "image/jpeg" ||
+  fileNameLower.endsWith(".jpg") ||
+  fileNameLower.endsWith(".jpeg")
+) {
+  rawMeta = parseJpegExifMetadata(arrayBuffer);
+}
+
+    const normalizedMeta = normalizeLocalImageMetadata(rawMeta);
+    const prompts = extractPrompts(normalizedMeta);
+
+    const positive = prompts.positive || "";
+    const negative = prompts.negative || "";
+
+    let infoText = buildLocalInfoText({
+      file,
+      meta: normalizedMeta,
+    });
+
+    if (!Object.keys(rawMeta || {}).length) {
+     infoText += "\n\nMetadata: No readable AI generation metadata found.";
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+
+    const data = {
+      source: "local",
+      filename: file.name,
+      type: file.type,
+      size: file.size,
+      positive,
+      negative,
+      info: infoText,
+      meta: normalizedMeta,
+      rawMeta,
+    };
+
+    node.__localImageInfoFileName = file.name;
+    node.__localImageInfoData = data;
+    node.__localImageInfoText = infoText;
+
+    const widget = node.widgets?.find((w) => w.name === "image_data");
+
+    if (widget) {
+      const payload = JSON.stringify(data);
+      widget.value = payload;
+      widget.callback?.(payload);
+    }
+
+    node.graph?.setDirtyCanvas(true, true);
+
+    await updateSupportNodes({
+      url: objectUrl,
+      meta: normalizedMeta,
+      id: null,
+      postId: null,
+      pageUrl: "",
+      sourcePageUrl: "",
+      pageDomain: "",
+      infoText,
+      isLocal: true,
+      filename: file.name,
+    });
+  } catch (err) {
+    console.warn("[Local Image Info] failed to parse image metadata", err);
+
+    const fallbackInfo =
+      `Source: Local image\n` +
+      `File: ${file.name}\n` +
+      `Type: ${file.type}\n` +
+      `Size: ${file.size} bytes\n\n` +
+      `Metadata parse failed: ${err?.message || err}`;
+
+    node.__localImageInfoFileName = file.name;
+    node.__localImageInfoText = fallbackInfo;
+    node.graph?.setDirtyCanvas(true, true);
+
+    alert("Failed to read image metadata. See browser console for details.");
+  }
+}
+
+function openUrlInNewTab(url) {
+  const finalUrl = String(url || "").trim();
+
+  if (!finalUrl) {
+    alert("No preview image is currently loaded.");
+    return;
+  }
+
+  const opened = window.open(finalUrl, "_blank", "noopener,noreferrer");
+
+  // Fallback if popup blocking prevents window.open.
+  if (!opened) {
+    const a = document.createElement("a");
+    a.href = finalUrl;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+}
+
+function openPreviewImage(node) {
+  const srcUrl = String(node?.__civitaiSourceUrl || "").trim();
+  const thumbUrl = String(node?.__civitaiThumbUrl || "").trim();
+  const pageUrl = String(node?.__civitaiPageUrl || "").trim();
+
+  const isLocalObjectUrl =
+    srcUrl.startsWith("blob:") ||
+    srcUrl.startsWith("data:") ||
+    thumbUrl.startsWith("blob:") ||
+    thumbUrl.startsWith("data:");
+
+  // Local image: open the browser object/data URL directly.
+  if (isLocalObjectUrl) {
+    openUrlInNewTab(thumbUrl || srcUrl);
+    return;
+  }
+
+  // CivitAI/remote image: prefer the proxied preview image URL that ComfyUI can serve.
+  // This avoids opening the CivitAI page and instead opens the actual image preview.
+  if (thumbUrl) {
+    openUrlInNewTab(thumbUrl);
+    return;
+  }
+
+  // If thumbUrl has not been initialized yet, rebuild the proxy URL from source.
+  if (srcUrl) {
+    openUrlInNewTab(buildProxyImageUrl(srcUrl, pageUrl));
+    return;
+  }
+
+  alert("No preview image is currently loaded.");
+}
+
 // ---------------- Register extension ----------------
 app.registerExtension({
   name: "CivitaiGallery.Extension.Register",
@@ -944,6 +2260,66 @@ app.registerExtension({
       return;
     }
 
+if (isLocalImageInfoNode(node)) {
+  if (node.__localImageInfoHooked) return;
+  node.__localImageInfoHooked = true;
+
+  node.size = node.size || [420, 260];
+  node.size[0] = Math.max(node.size[0], 420);
+  node.size[1] = Math.max(node.size[1], 260);
+
+  node.addWidget("button", "Upload Image", null, async () => {
+    await openLocalImagePicker(node);
+  });
+
+  const oldSerialize = node.onSerialize?.bind(node);
+  node.onSerialize = function (o) {
+    oldSerialize?.(o);
+    o.__localImageInfoFileName = this.__localImageInfoFileName || "";
+    o.__localImageInfoText = this.__localImageInfoText || "";
+    o.__localImageInfoData = this.__localImageInfoData || null;
+  };
+
+  const oldConfigure = node.onConfigure?.bind(node);
+  node.onConfigure = function (o) {
+    oldConfigure?.(o);
+    this.__localImageInfoFileName = o?.__localImageInfoFileName || "";
+    this.__localImageInfoText = o?.__localImageInfoText || "";
+    this.__localImageInfoData = o?.__localImageInfoData || null;
+    this.graph?.setDirtyCanvas(true, true);
+  };
+
+  const oldDraw = node.onDrawForeground?.bind(node);
+  node.onDrawForeground = function (ctx) {
+    oldDraw?.(ctx);
+
+  if (this.__localImageInfoDragOver) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(120, 200, 255, 0.95)";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(6, 6, this.size[0] - 12, this.size[1] - 12);
+    ctx.restore();
+  }
+
+    const pad = 10;
+    const top = 70;
+    const w = this.size[0] - pad * 2;
+    const h = this.size[1] - top - pad;
+
+    drawPanel(
+      ctx,
+      pad,
+      top,
+      w,
+      h,
+      "Local Image Info",
+      this.__localImageInfoText || "Click Upload Image, or drop an image directly onto this node."
+    );
+  };
+
+  return;
+}
+
     // Prompt Editor: bottom button bar (canvas), no widget buttons
     if (isPromptEditorNode(node)) {
       if (node.__civitaiPromptHooked) return;
@@ -952,6 +2328,28 @@ app.registerExtension({
       node.size = node.size || [560, 520];
       node.size[0] = Math.max(node.size[0], 560);
       node.size[1] = Math.max(node.size[1], 520);
+
+
+const oldSerialize = node.onSerialize?.bind(node);
+node.onSerialize = function (o) {
+  oldSerialize?.(o);
+  o.__civitaiPositive = this.__civitaiPositive || "";
+  o.__civitaiNegative = this.__civitaiNegative || "";
+};
+
+const oldConfigure = node.onConfigure?.bind(node);
+node.onConfigure = function (o) {
+  oldConfigure?.(o);
+  this.__civitaiPositive = o?.__civitaiPositive || this.__civitaiPositive || "";
+  this.__civitaiNegative = o?.__civitaiNegative || this.__civitaiNegative || "";
+
+  this.__civitaiOriginalPrompts = {
+    positive: this.__civitaiPositive,
+    negative: this.__civitaiNegative,
+  };
+
+  this.graph?.setDirtyCanvas(true, true);
+};
 
       const syncPromptStore = async () => {
         await postJSON("/civitai_gallery/set_prompt", {
@@ -1091,6 +2489,23 @@ app.registerExtension({
       node.size[0] = Math.max(node.size[0], 520);
       node.size[1] = Math.max(node.size[1], 220);
 
+
+const oldSerializeInfo = node.onSerialize?.bind(node);
+node.onSerialize = function (o) {
+  oldSerializeInfo?.(o);
+  o.__civitaiInfoText = this.__civitaiInfoText || "";
+  o.__civitaiPageUrl = this.__civitaiPageUrl || "";
+};
+
+const oldConfigureInfo = node.onConfigure?.bind(node);
+node.onConfigure = function (o) {
+  oldConfigureInfo?.(o);
+  this.__civitaiInfoText = o?.__civitaiInfoText || this.__civitaiInfoText || "";
+  this.__civitaiPageUrl = o?.__civitaiPageUrl || this.__civitaiPageUrl || "";
+  this.graph?.setDirtyCanvas(true, true);
+};
+
+
       const oldDraw = node.onDrawForeground?.bind(node);
       node.onDrawForeground = function (ctx) {
         oldDraw?.(ctx);
@@ -1117,9 +2532,52 @@ app.registerExtension({
         await copyText(page || fallback);
       });
 
+  node.addWidget("button", "Open Image", null, () => {
+    openPreviewImage(node);
+  });
+
       node.size = node.size || [320, 420];
       node.size[0] = Math.max(node.size[0], 320);
       node.size[1] = Math.max(node.size[1], 420);
+
+
+const oldSerializePrev = node.onSerialize?.bind(node);
+node.onSerialize = function (o) {
+  oldSerializePrev?.(o);
+  o.__civitaiPageUrl = this.__civitaiPageUrl || "";
+  o.__civitaiSourceUrl = this.__civitaiSourceUrl || "";
+};
+
+const oldConfigurePrev = node.onConfigure?.bind(node);
+node.onConfigure = function (o) {
+  oldConfigurePrev?.(o);
+
+  this.__civitaiPageUrl = o?.__civitaiPageUrl || this.__civitaiPageUrl || "";
+  this.__civitaiSourceUrl = o?.__civitaiSourceUrl || this.__civitaiSourceUrl || "";
+
+if (this.__civitaiSourceUrl) {
+  const isLocalObjectUrl =
+    typeof this.__civitaiSourceUrl === "string" &&
+    (this.__civitaiSourceUrl.startsWith("blob:") ||
+      this.__civitaiSourceUrl.startsWith("data:"));
+
+  const previewUrl = isLocalObjectUrl
+    ? this.__civitaiSourceUrl
+    : buildProxyImageUrl(this.__civitaiSourceUrl, this.__civitaiPageUrl);
+
+this.__civitaiThumbUrl = previewUrl;
+
+  if (!this.__civitaiThumbImg) {
+    this.__civitaiThumbImg = new Image();
+    this.__civitaiThumbImg.onload = () =>
+      this.graph?.setDirtyCanvas(true, true);
+  }
+
+  this.__civitaiThumbImg.src = previewUrl;
+}
+
+  this.graph?.setDirtyCanvas(true, true);
+};
 
       const oldDraw = node.onDrawForeground?.bind(node);
       node.onDrawForeground = function (ctx) {

@@ -1,3 +1,33 @@
+## New in v0.3.0
+
+###Fixed an issue where text was not persistent when changing tabs.
+
+####Local Image Info node
+
+v0.3.0 adds a new **CivitAI Local Image Info** node for working with images, containing metadata, stored locally.
+
+You can now:
+
+- Upload or drag/drop a local image directly onto the node.
+- Extract positive and negative prompts from:
+  - ComfyUI PNG metadata
+  - ComfyUI workflow metadata
+  - CivitAI ImagePlus gallery metadata embedded in saved workflows
+  - Automatic1111/Forge-style metadata
+  - JPEG EXIF metadata where available
+- Automatically send extracted prompts directly to the **CivitAI Prompt Editor** node.
+- Send model, sampler, seed, VAE, CLIP, checkpoint, UNET, and generation settings to the **CivitAI Info Display** node.
+- Preview the dropped/uploaded local image in the **CivitAI Image Preview** node.
+- Open the preview image directly from the Image Preview node.
+
+### Image Preview improvements
+
+The **CivitAI Image Preview** node now includes an **Open Image** button.
+
+- For CivitAI images, this opens the proxied ComfyUI preview image.
+- For local uploads, this opens the local browser preview image.
+- The existing **Copy CivitAI Page URL** button remains available for CivitAI-sourced images.
+
 ### v0.2.1 - June 2026
 - **Fixed**: Corrected metadata parsing to ensure prompts extract properly after recent Civitai metadata restructuring.
 - **Added**: Enhanced the Info block to cleanly parse and display the **Sampler**, **Scheduler**, **Steps**, **Model**, and **CFG** scales where available.
@@ -177,6 +207,24 @@ Outputs:
 ### 4) **CivitAI Info Display**
 
 A small info preview panel that updates instantly when you select an image.
+
+---
+
+### CivitAI Local Image Info
+
+Upload or drag/drop a local AI-generated image and automatically extract available metadata.
+
+Supported metadata includes:
+
+- ComfyUI prompt/workflow metadata
+- Automatic1111/Forge-style parameters
+- JPEG EXIF `ImageDescription` / `UserComment` where available
+
+The node updates:
+
+- CivitAI Prompt Editor
+- CivitAI Info Display
+- CivitAI Image Preview
 
 ---
 

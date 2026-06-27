@@ -4,6 +4,7 @@ from .civitai_gallery_backend import (
     CivitaiPromptEditorNode,
     CivitaiInfoDisplayNode,
     CivitaiImagePreviewNode,
+    LocalImageInfoNode,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -11,6 +12,7 @@ NODE_CLASS_MAPPINGS = {
     "CivitaiPromptEditorNode": CivitaiPromptEditorNode,
     "CivitaiInfoDisplayNode": CivitaiInfoDisplayNode,
     "CivitaiImagePreviewNode": CivitaiImagePreviewNode,
+    "LocalImageInfoNode": LocalImageInfoNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -18,6 +20,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CivitaiPromptEditorNode": "CivitAI Prompt Editor",
     "CivitaiInfoDisplayNode": "CivitAI Info Display",
     "CivitaiImagePreviewNode": "CivitAI Image Preview",
+    "LocalImageInfoNode": "CivitAI Local Image Info",
 }
 
 WEB_DIRECTORY = "./js"
