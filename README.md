@@ -1,3 +1,15 @@
+
+## v0.3.1
+
+### Fixed
+- Fixed stale metadata collisions between CivitAI-loaded images and locally loaded image metadata.
+- Fixed Image Preview state clearing so local image loads no longer retain previous CivitAI preview backend data.
+- Fixed duplicate browser tab opening from the Image Preview node's Open Image button.
+- Improved local image metadata handling to avoid pulling stale CivitAI prompt data from embedded workflows.
+
+### Notes
+If updating from an earlier version, restart ComfyUI and hard-refresh the browser after updating the custom node.
+
 ## New in v0.3.0
 
 ###Fixed an issue where text was not persistent when changing tabs.

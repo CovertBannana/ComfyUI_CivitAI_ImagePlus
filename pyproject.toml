@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-civitai-imageplus"
-version = "0.3.0"
+version = "0.3.1"
 description = "Browse CivitAI images in ComfyUI, preview protected images, edit prompts, and pass selected images into img2img workflows."
 license = { file = "LICENSE" }
 requires-python = ">=3.9"

@@ -485,7 +485,37 @@ async function setPreviewNode(node, srcUrl, pageUrl) {
     typeof srcUrl === "string" &&
     (srcUrl.startsWith("blob:") || srcUrl.startsWith("data:"));
 
-  if (!isLocalObjectUrl) {
+  if (!node.__civitaiSourceUrl) {
+    node.__civitaiThumbUrl = "";
+    node.__civitaiPageUrl = "";
+
+    if (node.__civitaiThumbImg) {
+      try {
+        node.__civitaiThumbImg.onload = null;
+        node.__civitaiThumbImg.onerror = null;
+        node.__civitaiThumbImg.src = "";
+      } catch {}
+    }
+
+    node.__civitaiThumbImg = null;
+
+    await postJSON("/civitai_gallery/set_preview", {
+      node_id: String(node.id),
+      url: "",
+      page_url: "",
+    });
+
+    node.graph?.setDirtyCanvas(true, true);
+    return;
+  }
+
+  if (isLocalObjectUrl) {
+    await postJSON("/civitai_gallery/set_preview", {
+      node_id: String(node.id),
+      url: "",
+      page_url: "",
+    });
+  } else {
     await postJSON("/civitai_gallery/set_preview", {
       node_id: String(node.id),
       url: node.__civitaiSourceUrl,
@@ -508,11 +538,12 @@ async function setPreviewNode(node, srcUrl, pageUrl) {
   node.__civitaiThumbImg.src = previewUrl;
   node.graph?.setDirtyCanvas(true, true);
 }
-
+  
 // ---------------- Apply selection pipeline ----------------
 async function updateSupportNodes(normalized) {
   const graph = app?.graph;
   if (!graph || !Array.isArray(graph._nodes)) return;
+  clearSupportNodes(graph);
   const prompts = extractPrompts(normalized.meta);
   const model = modelNameFromMeta(normalized.meta);
   const page = buildPageUrl(normalized.id, normalized.postId, {
@@ -545,6 +576,50 @@ if (!infoText) {
   }
   for (const n of graph._nodes) {
     if (isPreviewNode(n)) await setPreviewNode(n, normalized.url, page);
+  }
+}
+
+function clearSupportNodes(graph) {
+  if (!graph || !Array.isArray(graph._nodes)) return;
+
+  for (const n of graph._nodes) {
+    if (isPromptEditorNode(n)) {
+      n.__civitaiPositive = "";
+      n.__civitaiNegative = "";
+      n.__civitaiOriginalPrompts = {
+        positive: "",
+        negative: "",
+      };
+    }
+
+    if (isInfoNode(n)) {
+      n.__civitaiInfoText = "";
+      n.__civitaiPageUrl = "";
+    }
+
+    if (isPreviewNode(n)) {
+      n.__civitaiSourceUrl = "";
+      n.__civitaiThumbUrl = "";
+      n.__civitaiPageUrl = "";
+
+      if (n.__civitaiThumbImg) {
+        try {
+          n.__civitaiThumbImg.onload = null;
+          n.__civitaiThumbImg.onerror = null;
+          n.__civitaiThumbImg.src = "";
+        } catch {}
+      }
+
+      n.__civitaiThumbImg = null;
+
+      postJSON("/civitai_gallery/set_preview", {
+        node_id: String(n.id),
+        url: "",
+        page_url: "",
+      }).catch(() => {});
+    }
+
+    n.graph?.setDirtyCanvas(true, true);
   }
 }
 
@@ -1488,7 +1563,9 @@ function extractPromptsFromCivitaiSelectionData(promptJson) {
   return result;
 }
 
-function extractComfyPromptsFromPromptJson(promptJson) {
+
+function extractComfyPromptsFromPromptJson(promptJson, options = {}) {
+  const allowCivitaiFallback = options.allowCivitaiFallback === true;
   const result = {
     positive: "",
     negative: "",
@@ -1604,17 +1681,15 @@ const getNodeText = (node) => {
     }
   }
 
-  if (!result.positive || !result.negative) {
-    const civitaiPrompts = extractPromptsFromCivitaiSelectionData(promptJson);
-
-    if (!result.positive && civitaiPrompts.positive) {
-      result.positive = civitaiPrompts.positive;
-    }
-
-    if (!result.negative && civitaiPrompts.negative) {
-      result.negative = civitaiPrompts.negative;
-    }
+if (allowCivitaiFallback && (!result.positive || !result.negative)) {
+  const civitaiPrompts = extractPromptsFromCivitaiSelectionData(promptJson);
+  if (!result.positive && civitaiPrompts.positive) {
+    result.positive = civitaiPrompts.positive;
   }
+  if (!result.negative && civitaiPrompts.negative) {
+    result.negative = civitaiPrompts.negative;
+  }
+}
 
   return result;
 }
@@ -1910,7 +1985,10 @@ function normalizeLocalImageMetadata(rawMeta) {
   if (promptJson) {
     meta.comfy_prompt = promptJson;
 
-    const comfyPrompts = extractComfyPromptsFromPromptJson(promptJson);
+    
+const comfyPrompts = extractComfyPromptsFromPromptJson(promptJson, {
+  allowCivitaiFallback: false,
+});
     const comfyInfo = extractComfyGenerationInfoFromPromptJson(promptJson);
 
     meta.prompt = comfyPrompts.positive || "";
@@ -2196,18 +2274,13 @@ function openUrlInNewTab(url) {
     return;
   }
 
-  const opened = window.open(finalUrl, "_blank", "noopener,noreferrer");
-
-  // Fallback if popup blocking prevents window.open.
-  if (!opened) {
-    const a = document.createElement("a");
-    a.href = finalUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }
+  const a = document.createElement("a");
+  a.href = finalUrl;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function openPreviewImage(node) {
