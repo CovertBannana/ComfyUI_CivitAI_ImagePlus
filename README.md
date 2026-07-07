@@ -1,3 +1,5 @@
+### Notice
+This node pack is still functional but slightly superseded by https://github.com/CovertBannana/ComfyUI-ImagePlus, which is different in the fact that it is a more Unified node set, sliming the number of nodes down and also add some additional functionality like local image upload.
 
 ## v0.3.1
 
