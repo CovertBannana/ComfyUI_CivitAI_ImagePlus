@@ -1,7 +1,18 @@
-# Python cache
+api_key.txt
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+.comfyignore
 
 # Local archives/build artifacts
 node.zip
