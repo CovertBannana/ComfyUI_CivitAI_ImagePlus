@@ -1,3 +1,6 @@
+### Security patch
+Patched a request forgery (SSRF) issue in the Python code that was keeping the node from being published in the ComfyUI Manager.
+
 ### Notice
 This node pack is still functional but slightly superseded by https://github.com/CovertBannana/ComfyUI-ImagePlus, which is different in the fact that it is a more Unified node set, sliming the number of nodes down and also add some additional functionality like local image upload.
 
