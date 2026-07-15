@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 import io
 import urllib.request
+import urllib.parse
 from urllib.parse import urlparse, quote, parse_qs
 from typing import Optional
 
@@ -28,6 +29,24 @@ DEFAULT_SITE_API_BASES = (
 DEFAULT_PAGE_BASES = {
     "com": "https://civitai.com",
     "red": "https://civitai.red",
+}
+
+# Security limits for server-side image fetches.
+MAX_IMAGE_FETCH_BYTES = 50 * 1024 * 1024
+MAX_IMAGE_REDIRECTS = 5
+ALLOWED_PAGE_HOSTS = {
+    "civitai.com",
+    "www.civitai.com",
+    "civitai.red",
+    "www.civitai.red",
+}
+ALLOWED_IMAGE_HOSTS = {
+    "civitai.com",
+    "www.civitai.com",
+    "image.civitai.com",
+    "images.civitai.com",
+    "civitai.red",
+    "www.civitai.red",
 }
 
 
@@ -99,49 +118,57 @@ def _redact_params(d: dict):
     return safe
 
 
+def _normalized_hostname(raw_url_or_host: str) -> str:
+    """Return a lowercase hostname without userinfo, port, or trailing dot."""
+    value = str(raw_url_or_host or "").strip()
+    if not value:
+        return ""
+    try:
+        if "://" in value:
+            parsed = urlparse(value)
+            return (parsed.hostname or "").lower().strip(".")
+        parsed = urlparse("//" + value)
+        return (parsed.hostname or "").lower().strip(".")
+    except Exception:
+        return ""
+
+
 def _is_allowed_page_host(host: str) -> bool:
-    host = (host or "").lower()
-    return host in {
-        "civitai.com",
-        "www.civitai.com",
-        "civitai.red",
-        "www.civitai.red",
-    }
+    return _normalized_hostname(host) in ALLOWED_PAGE_HOSTS
 
 
 def _is_allowed_page_url(raw_url: str) -> bool:
     try:
-        u = urlparse(raw_url)
+        u = urlparse(str(raw_url or "").strip())
         if u.scheme not in ("http", "https"):
             return False
-        return _is_allowed_page_host(u.netloc)
+        host = (u.hostname or "").lower().strip(".")
+        return host in ALLOWED_PAGE_HOSTS
     except Exception:
         return False
 
 
 def _is_allowed_image_url(raw_url: str) -> bool:
     """
-    Prevent SSRF: only allow known civitai hosts.
+    Prevent SSRF: only allow CivitAI-owned image/page hosts.
+    This must be called before every server-side image fetch.
     """
     try:
-        u = urlparse(raw_url)
+        u = urlparse(str(raw_url or "").strip())
         if u.scheme not in ("http", "https"):
             return False
-        host = (u.netloc or "").lower()
-        if host == "image.civitai.com":
+        host = (u.hostname or "").lower().strip(".")
+        if not host:
+            return False
+        if host in ALLOWED_IMAGE_HOSTS:
             return True
         if host.endswith(".civitai.com"):
             return True
-        if host == "civitai.com":
-            return True
         if host.endswith(".civitai.red"):
-            return True
-        if host == "civitai.red":
             return True
         return False
     except Exception:
         return False
-
 
 def _page_base_from_url(raw_url: str) -> Optional[str]:
     if not raw_url:
@@ -207,22 +234,93 @@ def _auth_headers(api_key: str, referer_url: str = "") -> dict:
     }
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only when each target remains on the image allowlist."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_allowed_image_url(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                "Blocked redirect to non-allowlisted URL",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_REDIRECT_OPENER = urllib.request.build_opener(_SafeRedirectHandler)
+
+
+def _read_limited_response(response, max_bytes: int = MAX_IMAGE_FETCH_BYTES) -> bytes:
+    chunks = []
+    total = 0
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError("Upstream image is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _read_limited_aiohttp_response(resp, max_bytes: int = MAX_IMAGE_FETCH_BYTES) -> bytes:
+    chunks = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(1024 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise RuntimeError("Upstream image is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _resolve_redirect_url(base_url: str, location: str) -> str:
+    return urllib.parse.urljoin(base_url, location)
+
+
 async def fetch_bytes_authed(
     url: str,
     api_key: str,
     timeout_s: int = 60,
     referer_url: str = "",
 ) -> tuple[bytes, str]:
+    if not _is_allowed_image_url(url):
+        raise ValueError("URL host not allowed")
+    if referer_url and not _is_allowed_page_url(referer_url):
+        raise ValueError("Referer page host not allowed")
+
     headers = _auth_headers(api_key, referer_url=referer_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
+    current_url = str(url or "").strip()
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers) as resp:
-            content_type = resp.headers.get("Content-Type", "application/octet-stream")
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"Upstream image fetch failed ({resp.status}): {text[:300]}")
-            data = await resp.read()
-            return data, content_type
+        for _ in range(MAX_IMAGE_REDIRECTS + 1):
+            if not _is_allowed_image_url(current_url):
+                raise ValueError("Redirect URL host not allowed")
+
+            async with session.get(current_url, headers=headers, allow_redirects=False) as resp:
+                content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                if 300 <= resp.status < 400:
+                    location = resp.headers.get("Location") or ""
+                    if not location:
+                        raise RuntimeError("Upstream image redirect missing Location")
+                    next_url = _resolve_redirect_url(current_url, location)
+                    if not _is_allowed_image_url(next_url):
+                        raise RuntimeError("Blocked redirect to non-allowlisted URL")
+                    current_url = next_url
+                    continue
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Upstream image fetch failed ({resp.status}): {text[:300]}")
+                data = await _read_limited_aiohttp_response(resp)
+                return data, content_type
+
+        raise RuntimeError("Too many image redirects")
 
 
 def fetch_bytes_authed_sync(
@@ -231,10 +329,18 @@ def fetch_bytes_authed_sync(
     timeout_s: int = 60,
     referer_url: str = "",
 ) -> tuple[bytes, str]:
+    if not _is_allowed_image_url(url):
+        raise ValueError("URL host not allowed")
+    if referer_url and not _is_allowed_page_url(referer_url):
+        raise ValueError("Referer page host not allowed")
+
     headers = _auth_headers(api_key, referer_url=referer_url)
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout_s) as r:
-        data = r.read()
+    with _SAFE_REDIRECT_OPENER.open(req, timeout=timeout_s) as r:
+        final_url = getattr(r, "url", url)
+        if final_url and not _is_allowed_image_url(final_url):
+            raise ValueError("Final image URL host not allowed")
+        data = _read_limited_response(r)
         content_type = r.headers.get("Content-Type", "application/octet-stream")
         return data, content_type
 
@@ -374,17 +480,27 @@ def _iter_lookup_param_variants(id_key: str, id_value: str, nsfw: str = ""):
 
 def _maybe_fetch_tensor_from_image_url(image_url: str, page_url: str = "") -> torch.Tensor:
     """
-    Best-effort:
-    - try authed fetch first when API key exists
-    - otherwise try plain public fetch
+    Best-effort image fetch for preview output.
+    Security: every fetch path enforces the CivitAI image URL allowlist.
     """
+    image_url = str(image_url or "").strip()
+    page_url = str(page_url or "").strip()
+
     if not image_url:
         return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
+    if not _is_allowed_image_url(image_url):
+        print(f"[CivitAI Gallery] blocked non-allowlisted image URL: {image_url}")
+        return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+
+    if page_url and not _is_allowed_page_url(page_url):
+        print(f"[CivitAI Gallery] blocked non-allowlisted page URL: {page_url}")
+        page_url = ""
+
     api_key = load_api_key()
 
-    # First: try authenticated fetch when we can
-    if api_key and _is_allowed_image_url(image_url):
+    # First: try authenticated fetch when we can.
+    if api_key:
         try:
             img_bytes, _ = fetch_bytes_authed_sync(
                 image_url,
@@ -397,14 +513,17 @@ def _maybe_fetch_tensor_from_image_url(image_url: str, page_url: str = "") -> to
         except Exception:
             pass
 
-    # Fallback: direct public fetch
+    # Fallback: direct public fetch, still allowlisted with safe redirects.
     try:
         req = urllib.request.Request(
             image_url,
             headers={"User-Agent": "ComfyUI-CivitAI-Gallery"},
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
-            img_bytes = r.read()
+        with _SAFE_REDIRECT_OPENER.open(req, timeout=30) as r:
+            final_url = getattr(r, "url", image_url)
+            if final_url and not _is_allowed_image_url(final_url):
+                raise ValueError("Final image URL host not allowed")
+            img_bytes = _read_limited_response(r)
         img = Image.open(io.BytesIO(img_bytes))
         return _tensor_from_pil(img)
     except Exception as e:
@@ -781,6 +900,14 @@ async def civitai_set_preview(request):
 
     url = (body.get("url", "") or "").strip()
     page_url = (body.get("page_url", "") or body.get("pageUrl", "") or "").strip()
+
+    if url and not _is_allowed_image_url(url):
+        print(f"[CivitAI Gallery] blocked preview URL: {url}")
+        return web.json_response({"error": "URL host not allowed"}, status=400)
+
+    if page_url and not _is_allowed_page_url(page_url):
+        print(f"[CivitAI Gallery] blocked preview page_url: {page_url}")
+        return web.json_response({"error": "page_url host not allowed"}, status=400)
 
     entry = PREVIEW_STORE.get(node_id) or {"rev": 0}
     entry["url"] = url

@@ -46,6 +46,25 @@ function pageBaseFromUrl(raw) {
   return "";
 }
 
+function isAllowedCivitaiUrl(raw) {
+  try {
+    const url = new URL(String(raw || ""));
+    const host = String(url.hostname || "").toLowerCase();
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    return (
+      host === "civitai.com" ||
+      host === "www.civitai.com" ||
+      host === "civitai.red" ||
+      host === "www.civitai.red" ||
+      host === "image.civitai.com" ||
+      host.endsWith(".civitai.com") ||
+      host.endsWith(".civitai.red")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function buildProxyImageUrl(srcUrl, pageUrl = "") {
   const proxy = new URL("/civitai_gallery/proxy_image", window.location.origin);
   proxy.searchParams.set("url", srcUrl ?? "");
@@ -725,6 +744,7 @@ async function fetchPage(node, grid, settings, cursor, append = false) {
   params.set("period", settings.period);
   params.set("limit", String(settings.limit ?? 36));
   params.set("nsfw", settings.nsfw);
+  params.set("pageDomain", settings.pageDomain || "auto");
   if (cursor != null) params.set("cursor", String(cursor));
 
   try {
@@ -982,6 +1002,11 @@ async function fetchAndApplyUrl(node, url) {
   const trimmed = (url || "").trim();
   if (!trimmed) {
     alert("Please paste a CivitAI /posts/<id> URL (recommended), or /images/<id> (best-effort).");
+    return;
+  }
+
+  if (!isAllowedCivitaiUrl(trimmed)) {
+    alert("Only CivitAI URLs are supported.");
     return;
   }
 
