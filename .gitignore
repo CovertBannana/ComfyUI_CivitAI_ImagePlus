@@ -3,9 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Local/private files
-api_key.txt
-
 # Local archives/build artifacts
 node.zip
 *.zip
