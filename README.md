@@ -1,3 +1,13 @@
+⚠️ DEPRECATED
+This repository is no longer actively developed.
+
+Please use:
+
+https://github.com/CovertBannana/ComfyUI-ImagePlus
+
+Future development will occur exclusively in ComfyUI-ImagePlus.
+
+
 ### Security patch
 Patched a request forgery (SSRF) issue in the Python code that was keeping the node from being published in the ComfyUI Manager.
 
